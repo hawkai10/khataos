@@ -1,0 +1,15 @@
+{
+  "name": "khataos-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KhataOS MVP backend - unified finance operating platform for Indian mid-market companies",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "smoke": "node tests/smoke.js",
+    "reset": "node -e \"require('fs').rmSync('data/khataos.db',{force:true});console.log('db reset')\""
+  }
+}
