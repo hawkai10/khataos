@@ -307,6 +307,74 @@ async function check(name, fn) {
     assert.strictEqual(r3.imported.vouchers.updated, 0);
   });
 
+  await check('import: same number/date with distinct GUIDs never collide on the fallback key', async () => {
+    const co = coId + '-dedup-guid';
+    const xml = [
+      '<ENVELOPE><BODY><DATA>',
+      '<TALLYMESSAGE><GROUP><NAME>Current Liabilities</NAME></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Sundry Creditors</NAME><PARENT>Current Liabilities</PARENT></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Current Assets</NAME></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Bank Accounts</NAME><PARENT>Current Assets</PARENT></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Sundry Debtors</NAME><PARENT>Current Assets</PARENT></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><LEDGER><NAME>Sharma Enterprises</NAME><PARENT>Sundry Debtors</PARENT></LEDGER></TALLYMESSAGE>',
+      '<TALLYMESSAGE><LEDGER><NAME>HDFC Bank - Current A/c</NAME><PARENT>Bank Accounts</PARENT></LEDGER></TALLYMESSAGE>',
+      '<TALLYMESSAGE><VOUCHER VCHTYPE="Payment" ACTION="Create"><GUID>g-pay-001</GUID><ALTERID>1</ALTERID>',
+      '<DATE>20240405</DATE><VOUCHERNUMBER>001</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>',
+      '<PARTYLEDGERNAME>HDFC Bank - Current A/c</PARTYLEDGERNAME>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Rent Expenses</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-25000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank - Current A/c</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>25000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '</VOUCHER></TALLYMESSAGE>',
+      '<TALLYMESSAGE><VOUCHER VCHTYPE="Receipt" ACTION="Create"><GUID>g-rec-001</GUID><ALTERID>1</ALTERID>',
+      '<DATE>20240405</DATE><VOUCHERNUMBER>001</VOUCHERNUMBER><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>',
+      '<PARTYLEDGERNAME>Sharma Enterprises</PARTYLEDGERNAME>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank - Current A/c</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-30000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Sharma Enterprises</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>30000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '</VOUCHER></TALLYMESSAGE>',
+      '</DATA></BODY></ENVELOPE>',
+    ].join('');
+    const r = await TallyImport.handleImport(co, xml);
+    assert.strictEqual(r.validation.errors.length, 0, JSON.stringify(r.validation.errors));
+    assert.strictEqual(r.imported.vouchers.imported, 2, JSON.stringify(r.imported));
+    const vs = await all('SELECT voucher_number, voucher_type, tally_guid FROM tally_vouchers WHERE company_id = ?', [co]);
+    assert.strictEqual(vs.length, 2);
+    assert.ok(vs.some((v) => v.voucher_type === 'Payment' && v.tally_guid === 'g-pay-001'));
+    assert.ok(vs.some((v) => v.voucher_type === 'Receipt' && v.tally_guid === 'g-rec-001'));
+  });
+
+  await check('import: GUID-less vouchers of different types sharing number/date both import', async () => {
+    const co = coId + '-dedup-noguid';
+    const xml = [
+      '<ENVELOPE><BODY><DATA>',
+      '<TALLYMESSAGE><GROUP><NAME>Current Liabilities</NAME></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Sundry Creditors</NAME><PARENT>Current Liabilities</PARENT></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Current Assets</NAME></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Bank Accounts</NAME><PARENT>Current Assets</PARENT></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Sundry Debtors</NAME><PARENT>Current Assets</PARENT></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><LEDGER><NAME>Sharma Enterprises</NAME><PARENT>Sundry Debtors</PARENT></LEDGER></TALLYMESSAGE>',
+      '<TALLYMESSAGE><LEDGER><NAME>HDFC Bank - Current A/c</NAME><PARENT>Bank Accounts</PARENT></LEDGER></TALLYMESSAGE>',
+      '<TALLYMESSAGE><VOUCHER VCHTYPE="Payment" ACTION="Create">',
+      '<DATE>20240405</DATE><VOUCHERNUMBER>001</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>',
+      '<PARTYLEDGERNAME>HDFC Bank - Current A/c</PARTYLEDGERNAME>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Rent Expenses</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-25000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank - Current A/c</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>25000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '</VOUCHER></TALLYMESSAGE>',
+      '<TALLYMESSAGE><VOUCHER VCHTYPE="Receipt" ACTION="Create">',
+      '<DATE>20240405</DATE><VOUCHERNUMBER>001</VOUCHERNUMBER><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>',
+      '<PARTYLEDGERNAME>Sharma Enterprises</PARTYLEDGERNAME>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank - Current A/c</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-30000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Sharma Enterprises</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>30000.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '</VOUCHER></TALLYMESSAGE>',
+      '</DATA></BODY></ENVELOPE>',
+    ].join('');
+    const r = await TallyImport.handleImport(co, xml);
+    assert.strictEqual(r.validation.errors.length, 0, JSON.stringify(r.validation.errors));
+    assert.strictEqual(r.imported.vouchers.imported, 2, JSON.stringify(r.imported));
+    const vs = await all('SELECT voucher_number, voucher_type FROM tally_vouchers WHERE company_id = ?', [co]);
+    assert.strictEqual(vs.length, 2);
+    assert.ok(vs.some((v) => v.voucher_type === 'Payment'));
+    assert.ok(vs.some((v) => v.voucher_type === 'Receipt'));
+  });
+
   await check('import: cancelled voucher is stored with cancelled=1 and still counted for audit', async () => {
     const co = coId + '-cancelled';
     const xml = [

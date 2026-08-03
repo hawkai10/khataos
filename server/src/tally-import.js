@@ -156,20 +156,39 @@ async function upsertRecords(type, incomingRows, rows, companyId, summary, opts)
   }
   const seen = new Set();
   for (const inc of incomingRows) {
+    const alter = Number(inc.tally_alterid) || 0;
+    // GUID identity first: a voucher/ledger/group with a known GUID is matched
+    // by GUID alone and never routed through the fallback key, so two records
+    // sharing the same fallback key (e.g. Payment "001" and Receipt "001" on
+    // the same date) can never skip each other when both carry distinct GUIDs.
+    const guidRow = inc.tally_guid ? byGuid.get(inc.tally_guid) : null;
+    if (guidRow) {
+      if (alter > (Number(guidRow.tally_alterid) || 0)) {
+        await update(table, guidRow.id, { ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
+        byGuid.set(inc.tally_guid, { id: guidRow.id, tally_alterid: alter });
+        byName.set(keyOf(inc), { id: guidRow.id, tally_alterid: alter });
+        summary[type].updated++;
+      } else {
+        summary[type].skipped++;
+      }
+      continue;
+    }
+    // Fallback identity: only GUID-less records (or GUIDs not seen before) use
+    // the composite key; the `seen` set dedupes genuine duplicates in one
+    // import batch and is checked strictly after the GUID attempt above.
     const key = keyOf(inc);
     if (seen.has(key)) { summary[type].skipped++; continue; }
     seen.add(key);
-    const row = (inc.tally_guid && byGuid.get(inc.tally_guid)) || byName.get(key);
-    const alter = Number(inc.tally_alterid) || 0;
+    const row = byName.get(key);
     if (!row) {
       const id = uid(idPrefix);
       await insert(table, { id, company_id: companyId, ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
-      byGuid.set(inc.tally_guid, { id, tally_alterid: alter });
+      if (inc.tally_guid) byGuid.set(inc.tally_guid, { id, tally_alterid: alter });
       byName.set(key, { id, tally_alterid: alter });
       summary[type].imported++;
     } else if (alter > (Number(row.tally_alterid) || 0)) {
       await update(table, row.id, { ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
-      byGuid.set(inc.tally_guid, { id: row.id, tally_alterid: alter });
+      if (inc.tally_guid) byGuid.set(inc.tally_guid, { id: row.id, tally_alterid: alter });
       byName.set(key, { id: row.id, tally_alterid: alter });
       summary[type].updated++;
     } else {
@@ -195,7 +214,7 @@ async function importExport(companyId, data, rejectedVouchers = new Set()) {
 
   const existingGroupRows = await all('SELECT id, name, tally_guid, tally_alterid FROM tally_groups WHERE company_id = ?', [companyId]);
   const existingLedgerRows = await all('SELECT id, name, tally_guid, tally_alterid FROM tally_ledgers WHERE company_id = ?', [companyId]);
-  const existingVoucherRows = await all('SELECT id, voucher_number, date, tally_guid, tally_alterid FROM tally_vouchers WHERE company_id = ?', [companyId]);
+  const existingVoucherRows = await all('SELECT id, voucher_number, date, voucher_type, tally_guid, tally_alterid FROM tally_vouchers WHERE company_id = ?', [companyId]);
 
   await upsertRecords('groups', allGroups, existingGroupRows, companyId, summary, {
     table: 'tally_groups', idPrefix: 'tg', keyOf: (g) => g.name,
@@ -228,7 +247,11 @@ async function importExport(companyId, data, rejectedVouchers = new Set()) {
     voucherRows.push(v);
   }
   await upsertRecords('vouchers', voucherRows, existingVoucherRows, companyId, summary, {
-    table: 'tally_vouchers', idPrefix: 'tv', keyOf: (v) => `${v.voucher_number}|${v.date}`,
+    table: 'tally_vouchers', idPrefix: 'tv',
+    // Fallback identity includes voucher_type so a Payment "001" and Receipt
+    // "001" on the same date (common with manual/loose numbering) never
+    // collide on number|date alone.
+    keyOf: (v) => `${v.voucher_number}|${v.date}|${v.voucher_type}`,
     fields: (v) => ({
       voucher_number: v.voucher_number,
       voucher_type: v.voucher_type,
