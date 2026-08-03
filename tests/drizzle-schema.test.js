@@ -26,6 +26,11 @@ async function check(name, fn) {
   catch (e) { failed++; console.log('  FAIL  ' + name + ' - ' + e.message); }
 }
 
+// Per-invocation namespace for the shared parity script. This test file runs
+// twice inside one CI job (once in the main suite, once under pg-live.test.js)
+// against the same live PostgreSQL, so each invocation must use distinct ids.
+const PARITY_NS = 'parity-' + process.pid;
+
 function parseSchemaText() {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'src', 'db.js'), 'utf8');
   const m = src.match(/const SCHEMA = `([\s\S]*?)`;/);
@@ -74,7 +79,7 @@ function parseSchemaText() {
     const run = (engine) => {
       const r = spawnSync(process.execPath, ['-e', script], {
         cwd: path.join(__dirname, '..', 'server'),
-        env: { ...process.env, KHATAOS_DB_ENGINE: engine, KHATAOS_PGLITE_DIR: '' },
+        env: { ...process.env, KHATAOS_DB_ENGINE: engine, KHATAOS_PGLITE_DIR: '', PARITY_NS },
         encoding: 'utf8',
       });
       assert.strictEqual(r.status, 0, `${engine} child failed: ${r.stderr}`);
@@ -98,8 +103,8 @@ function parseSchemaText() {
       assert.strictEqual(r.status, 0, `${env.KHATAOS_DB_ENGINE} child failed: ${r.stderr}`);
       return r.stdout.split('\n').filter((l) => l.startsWith('{')).join('\n');
     };
-    const sqliteOut = run({ KHATAOS_DB_ENGINE: 'sqlite', KHATAOS_DATABASE_URL: '', KHATAOS_PGLITE_DIR: '' });
-    const liveOut = run({ KHATAOS_DB_ENGINE: 'postgres', KHATAOS_DATABASE_URL: url });
+    const sqliteOut = run({ KHATAOS_DB_ENGINE: 'sqlite', KHATAOS_DATABASE_URL: '', KHATAOS_PGLITE_DIR: '', PARITY_NS });
+    const liveOut = run({ KHATAOS_DB_ENGINE: 'postgres', KHATAOS_DATABASE_URL: url, PARITY_NS });
     assert.strictEqual(liveOut, sqliteOut, 'live Postgres output differs from sqlite');
   });
 

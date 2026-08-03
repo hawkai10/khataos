@@ -48,6 +48,21 @@ jobs:
       - name: Install server dependencies
         working-directory: server
         run: npm ci
+      - name: Wait for Postgres and reset DB
+        env:
+          PGPASSWORD: khataos
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client
+          # Wait for the service health check to complete
+          until pg_isready -h localhost -p 5432 -U khataos; do sleep 1; done
+          # Wipe the public schema and create a clean one so migrations and
+          # seed/test data never leak from a previous run of this job.
+          psql -h localhost -p 5432 -U khataos -d khataos -v ON_ERROR_STOP=1 <<'SQL'
+          DROP SCHEMA public CASCADE;
+          CREATE SCHEMA public;
+          GRANT ALL ON SCHEMA public TO khataos;
+          SQL
       - name: Run full suite + real-PostgreSQL variants
         run: node tests/run-all.js
         env:
