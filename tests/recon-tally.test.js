@@ -172,6 +172,38 @@ async function addVoucher(coId, number, type, amount, party, entries) {
     assert.ok(stats.auto >= 1);
   });
 
+  await check('bill-ref ties a Payment to a Tally-side invoice number shared across vouchers', async () => {
+    const co = 'rc-tallyref-' + Date.now();
+    await setup(co, 'Sundry Creditors - Sai Traders');
+    await addVoucher(co, 'PU-REF', 'Purchase', 75000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 75000, positive: false, bill_refs: ['INV-TALLY-1'] },
+    ]);
+    await addTxn(co, 'txn-7', -75000, 'R7');
+    await addVoucher(co, 'PY-REF', 'Payment', 75000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 75000, positive: false, bill_refs: ['INV-TALLY-1'] },
+      { ledger: 'HDFC Bank - Current A/c', amount: -75000, positive: true, bill_refs: [] },
+    ]);
+    const stats = await recon.matchAll(co);
+    const m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-7']);
+    assert.ok(m, 'expected a billref match');
+    assert.strictEqual(m.match_type, 'billref');
+    assert.ok(['PU-REF', 'PY-REF'].includes(m.tally_voucher_no), m.tally_voucher_no);
+    assert.ok(stats.auto >= 1);
+  });
+
+  await check('a voucher\u2019s own ref alone never strong-matches unrelated transactions', async () => {
+    const co = 'rc-selfref-' + Date.now();
+    await setup(co, 'Sundry Creditors - Sai Traders');
+    await addVoucher(co, 'PU-SELF', 'Purchase', 75000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 75000, positive: false, bill_refs: ['INV-SELF-1'] },
+    ]);
+    await addTxn(co, 'txn-8', -25000, 'R8');
+    const stats = await recon.matchAll(co);
+    const mm = await get('SELECT * FROM recon_matches WHERE bank_txn_id = ?', ['txn-8']);
+    assert.strictEqual(mm, null, 'own ref must not create a mismatch for unrelated amounts');
+    assert.strictEqual(stats.auto, 0);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });

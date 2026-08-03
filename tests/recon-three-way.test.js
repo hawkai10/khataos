@@ -173,10 +173,13 @@ function buildXml() {
   });
 
   // ===================== RUN RECONCILIATION =====================
-  await check('recon: matchAll + autoVoucherMatch run on the combined data', async () => {
-    await recon.matchAll(co);
+  await check('recon: matchAll reconciles debits AND credits (5 of 7 txns)', async () => {
+    const stats = await recon.matchAll(co);
+    assert.strictEqual(stats.auto, 5, JSON.stringify(stats));
+  });
+  await check('recon: autoVoucherMatch has nothing left once matchAll ran', async () => {
     const matched = await recon.autoVoucherMatch(co, 30);
-    assert.ok(matched >= 2, 'expected bank credits to match receipts/notes, got ' + matched);
+    assert.strictEqual(matched, 0);
   });
 
   const expectMatch = async (txnId, voucherNo) => {

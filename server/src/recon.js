@@ -30,13 +30,33 @@ async function loadTallyIndex(companyId) {
   });
   const vendors = await all('SELECT ledger_name FROM vendors WHERE company_id = ? AND active = 1', [companyId]);
   const vendorLedgers = new Set(vendors.map((v) => v.ledger_name).filter(Boolean));
+  // Any ledger that appears as a voucher party is a legitimate fuzzy-match
+  // counterpart (vendors AND customers), so receipts/refunds against
+  // customer ledgers can reconcile even when KhataOS has no vendor row.
+  const partyLedgers = new Set(parsed.map((v) => v.party_name).filter(Boolean));
   const invoices = await all('SELECT invoice_no FROM invoices WHERE company_id = ?', [companyId]);
   const payments = await all('SELECT reference FROM payments WHERE company_id = ? AND reference IS NOT NULL', [companyId]);
+  // Tally-side cross references: a bill ref appearing on two or more distinct
+  // vouchers ties a Payment/Receipt voucher to a Tally-side invoice number
+  // even when the invoice was never imported into KhataOS. A ref that exists
+  // on a single voucher is that voucher's own document number and must not
+  // make it a strong-match candidate for unrelated bank transactions.
+  const refOwners = new Map(); // ref -> Set(voucher ids)
+  for (const v of parsed) {
+    for (const r of v.billRefs) {
+      if (!refOwners.has(r)) refOwners.set(r, new Set());
+      refOwners.get(r).add(v.id);
+    }
+  }
+  const tallyRefs = new Set();
+  for (const [r, owners] of refOwners) if (owners.size >= 2) tallyRefs.add(r);
   return {
     vouchers: parsed,
     vendorLedgers,
+    partyLedgers,
     invoiceNos: new Set(invoices.map((i) => i.invoice_no)),
     payRefs: new Set(payments.map((p) => p.reference)),
+    tallyRefs,
   };
 }
 
@@ -54,11 +74,12 @@ function findTallyMatch(txn, index) {
   };
   const absAmt = Math.abs(Number(txn.amount) || 0);
   // Strong pass: BILLALLOCATIONS ref ties to a KhataOS invoice or payment.
+  // Tally-side document refs (invoices on purchase/sales/notes) count too.
   // Scanned across ALL vouchers so a ref conflict is flagged regardless of
   // direction; the actual match still requires the right voucher direction.
   for (const v of index.vouchers) {
     if (!v.billRefs.length) continue;
-    const ref = v.billRefs.find((r) => index.invoiceNos.has(r) || index.payRefs.has(r));
+    const ref = v.billRefs.find((r) => index.invoiceNos.has(r) || index.payRefs.has(r) || index.tallyRefs.has(r));
     if (!ref) continue;
     const voucherAmt = Math.abs(Number(v.amount) || 0);
     if (!amountClose(absAmt, voucherAmt)) {
@@ -72,7 +93,7 @@ function findTallyMatch(txn, index) {
     const voucherAmt = Math.abs(Number(v.amount) || 0);
     if (!amountClose(absAmt, voucherAmt)) continue;
     if (Math.abs(diffDays(v.date, txn.txn_date)) > 3) continue;
-    if (!v.party_name || !index.vendorLedgers.has(v.party_name)) continue;
+    if (!v.party_name || !(index.vendorLedgers.has(v.party_name) || index.partyLedgers.has(v.party_name))) continue;
     return { match: { voucher: v, ref: null, type: 'fuzzy', confidence: 0.78 } };
   }
   return null;
@@ -132,7 +153,7 @@ async function markMatched(bankTxnId, paymentId, type, confidence, by) {
 async function matchAll(companyId) {
   const candidates = await all(`
     SELECT * FROM bank_transactions
-    WHERE company_id = ? AND matched = 0 AND status = 'posted' AND amount < 0
+    WHERE company_id = ? AND matched = 0 AND status = 'posted'
     ORDER BY txn_date`, [companyId]);
 
   const payments = await all(`SELECT * FROM payments WHERE company_id = ? AND status IN ('completed','processing')`, [companyId]);
@@ -148,21 +169,26 @@ async function matchAll(companyId) {
   let auto = 0, total = 0;
   for (const txn of candidates) {
     total += 1;
-    // 1) exact reference match
-    let hit = payments.find(p => (p.reference && p.reference === txn.ref_no) && amountClose(txn.amount, -p.net_amount));
-    if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.99, 'auto'); auto++; continue; }
+    const isDebit = txn.amount < 0;
+    if (isDebit) {
+      // 1) exact reference match
+      let hit = payments.find(p => (p.reference && p.reference === txn.ref_no) && amountClose(txn.amount, -p.net_amount));
+      if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.99, 'auto'); auto++; continue; }
 
-    // 2) exact amount + date window
-    hit = payments.find(p => amountClose(txn.amount, -p.net_amount) && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 3);
-    if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.93, 'auto'); auto++; continue; }
+      // 2) exact amount + date window
+      hit = payments.find(p => amountClose(txn.amount, -p.net_amount) && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 3);
+      if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.93, 'auto'); auto++; continue; }
 
-    // 3) fuzzy: amount within ₹1, date within 5 days
-    hit = payments.find(p => Math.abs(Math.abs(txn.amount) - p.net_amount) <= 1 && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 5);
-    if (hit) { await markMatched(txn.id, hit.id, 'fuzzy', 0.68, 'auto'); auto++; continue; }
+      // 3) fuzzy: amount within 1, date within 5 days
+      hit = payments.find(p => Math.abs(Math.abs(txn.amount) - p.net_amount) <= 1 && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 5);
+      if (hit) { await markMatched(txn.id, hit.id, 'fuzzy', 0.68, 'auto'); auto++; continue; }
+    }
 
     // 4) real Tally voucher match (imported XML): bill-ref first, then
     //    amount + date + party. A bill-ref with a different amount is
-    //    recorded as a mismatch, never silently force-matched.
+    //    recorded as a mismatch, never silently force-matched. Applies to
+    //    debits AND credits (receipts, refunds on Debit Notes, etc.), so
+    //    /api/recon/run reconciles both directions.
     const tv = findTallyMatch(txn, tallyIndex);
     if (tv && tv.mismatch) {
       const m = tv.mismatch;
@@ -186,18 +212,20 @@ async function matchAll(companyId) {
       auto++; continue;
     }
 
-    // 5) KhataOS invoice fallback (approved invoice, no payment, no Tally
-    //    voucher imported yet). Labeled as KhataOS-side, not authoritative.
-    hit = vouchers.find(v => amountClose(txn.amount, -v.net_payable) && Math.abs(diffDays(v.invoice_date, txn.txn_date)) <= 4);
-    if (hit) {
-      await insert('recon_matches', {
-        id: uid('rm'), company_id: companyId, bank_txn_id: txn.id,
-        payment_id: null, tally_voucher_no: null,
-        match_type: 'fuzzy', confidence: 0.66, status: 'matched', matched_by: 'auto',
-        matched_at: nowIso(), notes: `Matched against KhataOS invoice ${hit.invoice_no} (no Tally voucher imported)`,
-      });
-      await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [txn.id]);
-      auto++; continue;
+    if (isDebit) {
+      // 5) KhataOS invoice fallback (approved invoice, no payment, no Tally
+      //    voucher imported yet). Labeled as KhataOS-side, not authoritative.
+      const hit = vouchers.find(v => amountClose(txn.amount, -v.net_payable) && Math.abs(diffDays(v.invoice_date, txn.txn_date)) <= 4);
+      if (hit) {
+        await insert('recon_matches', {
+          id: uid('rm'), company_id: companyId, bank_txn_id: txn.id,
+          payment_id: null, tally_voucher_no: null,
+          match_type: 'fuzzy', confidence: 0.66, status: 'matched', matched_by: 'auto',
+          matched_at: nowIso(), notes: `Matched against KhataOS invoice ${hit.invoice_no} (no Tally voucher imported)`,
+        });
+        await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [txn.id]);
+        auto++; continue;
+      }
     }
   }
 

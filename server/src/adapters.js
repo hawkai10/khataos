@@ -327,10 +327,13 @@ const GstDataProvider = {
     if (!snap) return [];
     const invs = await all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id WHERE i.company_id = ? AND i.invoice_date LIKE ? AND i.gstin_vendor IS NOT NULL`, [companyId, period + '%']);
     const g2b = JSON.parse(snap.data_json || '[]');
-    const g2bMap = new Map(g2b.map(g => [g.invoice_no, g]));
+    // Key by GSTIN + invoice ref (like CDNR) so the same invoice number from
+    // two suppliers can never collide; fall back to ref-only rows.
+    const g2bByGstinRef = new Map(g2b.map((g) => [`${g.gstin || ''}|${g.invoice_no}`, g]));
+    const g2bByRef = new Map(g2b.map((g) => [g.invoice_no, g]));
     const mismatches = [];
     for (const i of invs) {
-      const g = g2bMap.get(i.invoice_no);
+      const g = (i.gstin_vendor ? g2bByGstinRef.get(`${i.gstin_vendor}|${i.invoice_no}`) : null) || g2bByRef.get(i.invoice_no);
       const platformItc = (i.cgst || 0) + (i.sgst || 0) + (i.igst || 0);
       if (!g) {
         mismatches.push({ invoice_no: i.invoice_no, vendor_gstin: i.gstin_vendor, vendor_name: i.vendor_name || '', platform_amount: platformItc, gstr2b_amount: 0, variance: platformItc, note: 'Supplier invoice not yet reflected in GSTR-2B' });
@@ -345,18 +348,28 @@ const GstDataProvider = {
     const gstinByName = new Map(tallyLedgers.map((l) => [l.name, l.gstin]));
     const parseJson = (j) => { try { return JSON.parse(j || '[]'); } catch { return []; } };
     for (const v of tallyVouchers) {
+      const gstin = gstinByName.get(v.party_name) || null;
+      const seen = new Set();
       const refs = [];
       for (const e of parseJson(v.entry_json)) for (const r of e.bill_refs || []) refs.push(r);
-      const ref = refs[0];
-      if (!ref) continue;
-      const g = g2bMap.get(ref);
-      const platformAmount = Math.abs(v.amount || 0);
-      if (!g) {
-        mismatches.push({ invoice_no: ref, vendor_gstin: gstinByName.get(v.party_name) || null, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: 0, variance: platformAmount, note: 'Tally purchase voucher not yet reflected in GSTR-2B' });
-      } else {
-        const g2bAmount = (g.taxable || 0) + (g.cgst || 0) + (g.sgst || 0) + (g.igst || 0);
-        if (Math.abs(g2bAmount - platformAmount) > 1) {
-          mismatches.push({ invoice_no: ref, vendor_gstin: gstinByName.get(v.party_name) || null, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: g2bAmount, variance: inr(platformAmount - g2bAmount), note: 'Tally purchase voucher amount differs from GSTR-2B' });
+      // A voucher can reference several invoices (one payment covering
+      // multiple bills) — every ref is compared, not just the first.
+      const uniqueRefs = [...new Set(refs)];
+      const amountCheckable = uniqueRefs.length === 1;
+      for (const ref of uniqueRefs) {
+        if (seen.has(ref)) continue;
+        seen.add(ref);
+        const g = (gstin ? g2bByGstinRef.get(`${gstin}|${ref}`) : null) || g2bByRef.get(ref);
+        const platformAmount = Math.abs(v.amount || 0);
+        if (!g) {
+          mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: 0, variance: platformAmount, note: 'Tally purchase voucher not yet reflected in GSTR-2B' });
+        } else if (amountCheckable) {
+          // A multi-ref voucher's total cannot be compared per invoice; only
+          // presence is checked for those.
+          const g2bAmount = (g.taxable || 0) + (g.cgst || 0) + (g.sgst || 0) + (g.igst || 0);
+          if (Math.abs(g2bAmount - platformAmount) > 1) {
+            mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: g2bAmount, variance: inr(platformAmount - g2bAmount), note: 'Tally purchase voucher amount differs from GSTR-2B' });
+          }
         }
       }
     }
@@ -368,19 +381,24 @@ const GstDataProvider = {
     const cdnrByGstinRef = new Map(cdnrRows.map((c) => [`${c.gstin || ''}|${c.invoice_no}`, c]));
     const cdnrByRef = new Map(cdnrRows.map((c) => [c.invoice_no, c]));
     for (const v of noteVouchers) {
+      const gstin = gstinByName.get(v.party_name) || null;
+      const seen = new Set();
       const refs = [];
       for (const e of parseJson(v.entry_json)) for (const r of e.bill_refs || []) refs.push(r);
-      const ref = refs[0];
-      if (!ref) continue;
-      const gstin = gstinByName.get(v.party_name) || null;
-      const c = (gstin ? cdnrByGstinRef.get(`${gstin}|${ref}`) : null) || cdnrByRef.get(ref);
-      const noteAmount = Math.abs(v.amount || 0);
-      if (!c) {
-        mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: noteAmount, gstr2b_amount: 0, variance: noteAmount, note: 'Tally credit/debit note voucher not yet reflected in GSTR-2B' });
-      } else {
-        const cdnrAmount = (c.taxable || 0) + (c.cgst || 0) + (c.sgst || 0) + (c.igst || 0);
-        if (Math.abs(cdnrAmount - noteAmount) > 1) {
-          mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: noteAmount, gstr2b_amount: cdnrAmount, variance: inr(noteAmount - cdnrAmount), note: 'Tally credit/debit note voucher amount differs from GSTR-2B' });
+      const uniqueRefs = [...new Set(refs)];
+      const amountCheckable = uniqueRefs.length === 1;
+      for (const ref of uniqueRefs) {
+        if (seen.has(ref)) continue;
+        seen.add(ref);
+        const c = (gstin ? cdnrByGstinRef.get(`${gstin}|${ref}`) : null) || cdnrByRef.get(ref);
+        const noteAmount = Math.abs(v.amount || 0);
+        if (!c) {
+          mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: noteAmount, gstr2b_amount: 0, variance: noteAmount, note: 'Tally credit/debit note voucher not yet reflected in GSTR-2B' });
+        } else if (amountCheckable) {
+          const cdnrAmount = (c.taxable || 0) + (c.cgst || 0) + (c.sgst || 0) + (c.igst || 0);
+          if (Math.abs(cdnrAmount - noteAmount) > 1) {
+            mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: noteAmount, gstr2b_amount: cdnrAmount, variance: inr(noteAmount - cdnrAmount), note: 'Tally credit/debit note voucher amount differs from GSTR-2B' });
+          }
         }
       }
     }
