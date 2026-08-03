@@ -14,6 +14,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+// Drizzle ORM layer: coexists with the custom wrapper during the transition.
+// Schema lives in src/db/schema.js (one declarative source -> both dialects);
+// migrations live in ../drizzle/{sqlite,pg} and are applied on boot.
+const schema = require('./db/schema');
+
 const ENGINE = process.env.KHATAOS_DB_ENGINE || 'sqlite';
 const DATABASE_URL = process.env.KHATAOS_DATABASE_URL || '';
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -537,6 +542,34 @@ function translate(sql) {
 // ---- engine implementations ----
 let impl = null;
 let ready;
+let engineClient = null;
+let drizzleDb = null;
+let drizzleReady = Promise.resolve();
+
+// Build the Drizzle instance for the active engine and apply the Drizzle
+// migrations (idempotent baseline + any tracked changes). Consumed through
+// getDrizzle() so callers always get a fully-migrated instance.
+async function initDrizzle() {
+  const migrationsRoot = path.join(__dirname, '..', 'drizzle');
+  if (DB_ENGINE === 'sqlite') {
+    const { createClient } = require('@libsql/client');
+    const { drizzle } = require('drizzle-orm/libsql');
+    const { migrate } = require('drizzle-orm/libsql/migrator');
+    const client = createClient({ url: 'file:' + encodeURI(DB_PATH.split(path.sep).join('/')) });
+    drizzleDb = drizzle(client, { schema: schema.sqlite });
+    await migrate(drizzleDb, { migrationsFolder: path.join(migrationsRoot, 'sqlite') });
+  } else if (DB_ENGINE === 'postgres') {
+    const { drizzle } = require('drizzle-orm/node-postgres');
+    const { migrate } = require('drizzle-orm/node-postgres/migrator');
+    drizzleDb = drizzle(engineClient, { schema: schema.pg });
+    await migrate(drizzleDb, { migrationsFolder: path.join(migrationsRoot, 'pg') });
+  } else {
+    const { drizzle } = require('drizzle-orm/pglite');
+    const { migrate } = require('drizzle-orm/pglite/migrator');
+    drizzleDb = drizzle(engineClient, { schema: schema.pg });
+    await migrate(drizzleDb, { migrationsFolder: path.join(migrationsRoot, 'pg') });
+  }
+}
 
 if (DB_ENGINE === 'sqlite') {
   const { DatabaseSync } = require('node:sqlite');
@@ -572,7 +605,13 @@ if (DB_ENGINE === 'sqlite') {
     run: (sql, params) => sqliteDb.prepare(sql).run(...params),
     exec: (sql) => sqliteDb.exec(sql),
   };
+  engineClient = sqliteDb;
   ready = Promise.resolve();
+  // Drizzle is additive during the transition: a migration failure (e.g. an
+  // ancient schema missing a column) is logged and leaves drizzleDb null;
+  // getDrizzle() then fails loudly for converted modules, while modules still
+  // on the custom wrapper keep working.
+  drizzleReady = initDrizzle().catch((err) => { console.error(`[db] Drizzle migration failed: ${err.message}`); drizzleDb = null; });
 } else {
   // pglite or postgres — async init
   ready = (async () => {
@@ -580,6 +619,7 @@ if (DB_ENGINE === 'sqlite') {
     if (DB_ENGINE === 'postgres') {
       const { Pool } = require('pg');
       client = new Pool({ connectionString: DATABASE_URL, max: 10 });
+      engineClient = client;
       await client.query(PG_SCHEMA);
       await runMigrationsAsync((sql) => client.query(sql));
       await runVersionedMigrationsAsync((sql) => client.query(sql), (sql) => client.query(sql).then((r) => r.rows));
@@ -595,6 +635,7 @@ if (DB_ENGINE === 'sqlite') {
       client = pgliteDir && probeWritable(path.dirname(pgliteDir) || '.')
         ? new PGlite(pgliteDir)
         : new PGlite();
+      engineClient = client;
       DB_PATH = pgliteDir || '(in-memory pglite)';
       await client.exec(PG_SCHEMA);
       await runMigrationsAsync((sql) => client.exec(sql));
@@ -606,6 +647,8 @@ if (DB_ENGINE === 'sqlite') {
         exec: async (sql) => { await client.exec(sql); },
       };
     }
+    drizzleReady = initDrizzle();
+    await drizzleReady;
     if (DB_ENGINE === 'postgres') console.log(`[db] connected to PostgreSQL: ${DATABASE_URL.replace(/:\/\/[^@]+@/, '://***@')}`);
     else console.log(`[db] using in-process PostgreSQL (pglite): ${DB_PATH}`);
   })().catch((err) => {
@@ -627,6 +670,14 @@ async function insert(table, obj) {
   const marks = keys.map((_, i) => (DB_ENGINE === 'sqlite' ? '?' : `$${i + 1}`)).join(', ');
   await impl.run(`INSERT INTO ${table} (${cols}) VALUES (${marks})`, keys.map(k => obj[k]));
   return { lastInsertRowid: null };
+}
+
+// Drizzle query-builder accessor for modules converted off the custom wrapper.
+async function getDrizzle() {
+  await ready;
+  await drizzleReady;
+  if (!drizzleDb) throw new Error('Drizzle instance unavailable (migrations did not apply cleanly)');
+  return drizzleDb;
 }
 
 async function update(table, id, obj) {
@@ -651,4 +702,4 @@ async function countRows(table) {
   return Number(r ? r.c : 0);
 }
 
-module.exports = { all, get, run, insert, update, exec, listTables, countRows, DB_PATH, DB_ENGINE, DATABASE_URL };
+module.exports = { all, get, run, insert, update, exec, listTables, countRows, getDrizzle, DB_PATH, DB_ENGINE, DATABASE_URL };

@@ -14,9 +14,15 @@
 //               company, preserving the accounting structure.
 // ============================================================================
 
-const { all, insert, update } = require('./db');
+const { getDrizzle, DB_ENGINE } = require('./db');
+const { sqlite, pg } = require('./db/schema');
+const { eq } = require('drizzle-orm');
 const { uid, nowIso } = require('./util');
 const Tally = require('./tally');
+
+// Drizzle schema for the active engine (single-engine per process, mirroring
+// db.js's engine selection).
+const T = DB_ENGINE === 'sqlite' ? sqlite : pg;
 
 // GSTIN = 15 chars: 2-digit state code, 10-char PAN (5 letters, 4 digits,
 // 1 letter), entity code, 'Z', check character.
@@ -69,8 +75,9 @@ function planAutoLedgers(data) {
 }
 
 async function existingNames(companyId) {
-  const groups = (await all('SELECT name FROM tally_groups WHERE company_id = ?', [companyId])).map((r) => r.name);
-  const ledgers = (await all('SELECT name FROM tally_ledgers WHERE company_id = ?', [companyId])).map((r) => r.name);
+  const d = await getDrizzle();
+  const groups = (await d.select({ name: T.tally_groups.name }).from(T.tally_groups).where(eq(T.tally_groups.company_id, companyId))).map((r) => r.name);
+  const ledgers = (await d.select({ name: T.tally_ledgers.name }).from(T.tally_ledgers).where(eq(T.tally_ledgers.company_id, companyId))).map((r) => r.name);
   return { groups: new Set(groups), ledgers: new Set(ledgers) };
 }
 
@@ -149,6 +156,7 @@ async function validateExport(companyId, data) {
 // name / number+date key for exports without GUIDs. Returns nothing; mutates
 // the summary counters. opts: { table, idPrefix, keyOf, fields }.
 async function upsertRecords(type, incomingRows, rows, companyId, summary, opts) {
+  const d = await getDrizzle();
   const { table, idPrefix, keyOf, fields } = opts;
   const byGuid = new Map();
   const byName = new Map();
@@ -166,7 +174,7 @@ async function upsertRecords(type, incomingRows, rows, companyId, summary, opts)
     const guidRow = inc.tally_guid ? byGuid.get(inc.tally_guid) : null;
     if (guidRow) {
       if (alter > (Number(guidRow.tally_alterid) || 0)) {
-        await update(table, guidRow.id, { ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
+        await d.update(table).set({ ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter }).where(eq(table.id, guidRow.id));
         byGuid.set(inc.tally_guid, { id: guidRow.id, tally_alterid: alter });
         byName.set(keyOf(inc), { id: guidRow.id, tally_alterid: alter });
         summary[type].updated++;
@@ -184,12 +192,12 @@ async function upsertRecords(type, incomingRows, rows, companyId, summary, opts)
     const row = byName.get(key);
     if (!row) {
       const id = uid(idPrefix);
-      await insert(table, { id, company_id: companyId, ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
+      await d.insert(table).values({ id, company_id: companyId, ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
       if (inc.tally_guid) byGuid.set(inc.tally_guid, { id, tally_alterid: alter });
       byName.set(key, { id, tally_alterid: alter });
       summary[type].imported++;
     } else if (alter > (Number(row.tally_alterid) || 0)) {
-      await update(table, row.id, { ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
+      await d.update(table).set({ ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter }).where(eq(table.id, row.id));
       if (inc.tally_guid) byGuid.set(inc.tally_guid, { id: row.id, tally_alterid: alter });
       byName.set(key, { id: row.id, tally_alterid: alter });
       summary[type].updated++;
@@ -203,6 +211,7 @@ async function upsertRecords(type, incomingRows, rows, companyId, summary, opts)
 // Records rejected by validation (e.g. unbalanced vouchers) are skipped and
 // counted, never partially written.
 async function importExport(companyId, data, rejectedVouchers = new Set()) {
+  const d = await getDrizzle();
   const auto = planAutoLedgers(data);
   const allGroups = [...data.groups];
   for (const a of auto) {
@@ -214,12 +223,12 @@ async function importExport(companyId, data, rejectedVouchers = new Set()) {
     vouchers: { total: data.vouchers.length, imported: 0, updated: 0, skipped: 0 },
   };
 
-  const existingGroupRows = await all('SELECT id, name, tally_guid, tally_alterid FROM tally_groups WHERE company_id = ?', [companyId]);
-  const existingLedgerRows = await all('SELECT id, name, tally_guid, tally_alterid FROM tally_ledgers WHERE company_id = ?', [companyId]);
-  const existingVoucherRows = await all('SELECT id, voucher_number, date, voucher_type, tally_guid, tally_alterid FROM tally_vouchers WHERE company_id = ?', [companyId]);
+  const existingGroupRows = await d.select({ id: T.tally_groups.id, name: T.tally_groups.name, tally_guid: T.tally_groups.tally_guid, tally_alterid: T.tally_groups.tally_alterid }).from(T.tally_groups).where(eq(T.tally_groups.company_id, companyId));
+  const existingLedgerRows = await d.select({ id: T.tally_ledgers.id, name: T.tally_ledgers.name, tally_guid: T.tally_ledgers.tally_guid, tally_alterid: T.tally_ledgers.tally_alterid }).from(T.tally_ledgers).where(eq(T.tally_ledgers.company_id, companyId));
+  const existingVoucherRows = await d.select({ id: T.tally_vouchers.id, voucher_number: T.tally_vouchers.voucher_number, date: T.tally_vouchers.date, voucher_type: T.tally_vouchers.voucher_type, tally_guid: T.tally_vouchers.tally_guid, tally_alterid: T.tally_vouchers.tally_alterid }).from(T.tally_vouchers).where(eq(T.tally_vouchers.company_id, companyId));
 
   await upsertRecords('groups', allGroups, existingGroupRows, companyId, summary, {
-    table: 'tally_groups', idPrefix: 'tg', keyOf: (g) => g.name,
+    table: T.tally_groups, idPrefix: 'tg', keyOf: (g) => g.name,
     fields: (g) => ({ name: g.name, parent: g.parent || null }),
   });
 
@@ -231,7 +240,7 @@ async function importExport(companyId, data, rejectedVouchers = new Set()) {
   }
   const ledgerRows = [...dataLedgers, ...auto.map((a) => ({ name: a.name, group_name: a.group, opening_balance: 0, gstin: null }))];
   await upsertRecords('ledgers', ledgerRows, existingLedgerRows, companyId, summary, {
-    table: 'tally_ledgers', idPrefix: 'tl', keyOf: (l) => l.name,
+    table: T.tally_ledgers, idPrefix: 'tl', keyOf: (l) => l.name,
     fields: (l) => ({
       name: l.name, group_name: l.group_name || null,
       opening_balance: Number.isFinite(l.opening_balance) ? l.opening_balance : 0,
@@ -249,7 +258,7 @@ async function importExport(companyId, data, rejectedVouchers = new Set()) {
     voucherRows.push(v);
   }
   await upsertRecords('vouchers', voucherRows, existingVoucherRows, companyId, summary, {
-    table: 'tally_vouchers', idPrefix: 'tv',
+    table: T.tally_vouchers, idPrefix: 'tv',
     // Fallback identity includes voucher_type so a Payment "001" and Receipt
     // "001" on the same date (common with manual/loose numbering) never
     // collide on number|date alone.

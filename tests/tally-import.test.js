@@ -7,6 +7,14 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
+// `node tests/tally-import.test.js --pg` runs on pglite instead of SQLite so
+// the Drizzle query-builder path is exercised on the PostgreSQL dialect too.
+if (process.argv.includes('--pg')) {
+  process.env.KHATAOS_DB_ENGINE = 'pglite';
+  delete process.env.KHATAOS_PGLITE_DIR;
+  console.log('DB engine: in-process PostgreSQL (pglite)');
+}
+
 const TEST_DB = path.join(os.tmpdir(), 'khataos-data', 'tally-import-unit-' + process.pid + '.db');
 process.env.KHATAOS_DB = TEST_DB;
 for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
