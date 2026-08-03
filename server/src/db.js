@@ -618,6 +618,12 @@ if (DB_ENGINE === 'sqlite') {
     let client;
     if (DB_ENGINE === 'postgres') {
       const { Pool } = require('pg');
+      const { types } = require('pg');
+      // Real Postgres returns BIGINT (COUNT(*)/SUM over integers) as strings,
+      // while SQLite and pglite return numbers. Normalize so query results are
+      // identical across all three engines (schema has no true BIGINT columns).
+      types.setTypeParser(20, (v) => (v == null ? null : parseInt(v, 10))); // int8
+      types.setTypeParser(1700, (v) => (v == null ? null : Number(v))); // numeric
       client = new Pool({ connectionString: DATABASE_URL, max: 10 });
       engineClient = client;
       await client.query(PG_SCHEMA);

@@ -128,21 +128,27 @@ $env:KHATAOS_DATABASE_URL = "postgres://…"; node server/src/server.js
 
 ## Verification
 
-The full suite runs green on SQLite and in-process PostgreSQL:
+The full suite runs green on SQLite, in-process PostgreSQL (pglite), and a
+**real PostgreSQL server**. The aggregator runs everything; CI runs it on
+every push (SQLite + pglite, plus a real Postgres service container):
 
 ```powershell
-# unit + integration tests (parse, import, recon, GST, security, migrations, fuzz)
-node tests\tally.test.js
-node tests\recon-three-way.test.js
-node tests\recon-three-way.test.js --pg
-node tests\smoke.js
-node tests\smoke.js --pg
+# everything on SQLite + pglite
+node tests\run-all.js
+
+# everything + a live PostgreSQL server (no Docker required: boots real
+# postgres binaries via the embedded-postgres devDependency)
+node tests\run-all.js --pg-live
 ```
 
 `tests/recon-three-way.test.js` pushes data of different types through all
 three channels (Tally XML, bank statements, GSTR-2B) and asserts the
 reconciliation results; `tests/smoke.js` bootstraps a minimal tenant and
-exercises every module end-to-end with real pipeline data.
+exercises every module end-to-end with real pipeline data. The Drizzle
+schema-parity test (`tests/drizzle-schema.test.js`) runs on every commit and
+fails if the Drizzle schema and the `db.js` SCHEMA drift apart — including a
+SQLite-vs-live-PostgreSQL result-equality check when a real server is wired
+up (`PG_LIVE_URL`, which CI provides via a Postgres service container).
 
 ## Repository map
 

@@ -11,6 +11,8 @@
     "start": "node src/server.js",
     "smoke": "node ../tests/smoke.js",
     "smoke:pg": "node ../tests/smoke.js --pg",
+    "test:all": "node ../tests/run-all.js",
+    "test:pg-live": "node ../tests/pg-live.test.js --start-embedded",
     "db:generate": "drizzle-kit generate --config=drizzle.config.sqlite.js",
     "db:generate:pg": "drizzle-kit generate --config=drizzle.config.pg.js",
     "reset": "node -e \"require('fs').rmSync('data/khataos.db',{force:true});console.log('db reset')\""
@@ -23,6 +25,7 @@
     "pg": "^8.13.0"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.31.10"
+    "drizzle-kit": "^0.31.10",
+    "embedded-postgres": "^18.4.0-beta.17"
   }
 }

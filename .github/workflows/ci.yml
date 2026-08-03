@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Unit + E2E (SQLite + pglite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+      - name: Run full test suite (includes schema parity on every commit)
+        run: node tests/run-all.js
+
+  test-postgres:
+    name: Real PostgreSQL (service container)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: khataos
+          POSTGRES_PASSWORD: khataos
+          POSTGRES_DB: khataos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U khataos -d khataos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+      - name: Run full suite + real-PostgreSQL variants
+        run: node tests/run-all.js
+        env:
+          PG_LIVE_URL: postgresql://khataos:khataos@localhost:5432/khataos
