@@ -13,6 +13,10 @@ const crypto = require('crypto');
 
 const TEST_DB = path.join(os.tmpdir(), 'khataos-data', 'security-unit-' + process.pid + '.db');
 process.env.KHATAOS_DB = TEST_DB;
+// The burst checks below isolate rate-limit buckets via X-Forwarded-For. That
+// only works in trusted-proxy mode, so this test process exercises that path;
+// the default socket-IP keying is covered by the real-HTTP smoke suite.
+process.env.KHATAOS_TRUST_PROXY = '1';
 for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
   try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
 }
@@ -28,8 +32,8 @@ async function check(name, fn) {
   catch (e) { failed++; console.log('  FAIL  ' + name + ' - ' + e.message); }
 }
 
-async function login(app, email, password) {
-  return app.inject({ method: 'POST', url: '/api/auth/login', payload: JSON.stringify({ email, password }) });
+async function login(app, email, password, headers = {}) {
+  return app.inject({ method: 'POST', url: '/api/auth/login', headers, payload: JSON.stringify({ email, password }) });
 }
 
 (async () => {
@@ -94,6 +98,25 @@ async function login(app, email, password) {
     assert.ok(out.headers['set-cookie'].includes('Max-Age=0'), out.headers['set-cookie']);
     const me = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } });
     assert.strictEqual(me.statusCode, 401, 'cleared cookie must not authenticate');
+  });
+
+  // Concurrent bursts: the rate-limit increment is synchronous inside Fastify's
+  // onRequest hook, so parallel requests must be counted exactly — 10 login
+  // attempts pass (limit 10) and the 11th+ are blocked; 5 OTP requests pass
+  // (limit 5) and the 6th+ are blocked. These assert exact counts, not just
+  // "some 429 appeared", so an off-by-one or race fails loudly.
+  await check('auth: concurrent login burst counted exactly (10 pass, 11th+ blocked)', async () => {
+    const results = await Promise.all(Array.from({ length: 15 }, () => login(app, 'burst@test.in', 'wrong', { 'x-forwarded-for': '203.0.113.55' })));
+    const counts = results.reduce((m, r) => { m[r.statusCode] = (m[r.statusCode] || 0) + 1; return m; }, {});
+    assert.deepStrictEqual(counts, { 401: 10, 429: 5 });
+  });
+
+  await check('auth: concurrent OTP burst counted exactly (5 pass, 6th+ blocked)', async () => {
+    const results = await Promise.all(Array.from({ length: 7 }, () => app.inject({
+      method: 'POST', url: '/api/gstn/otp/request', headers: { 'x-forwarded-for': '198.51.100.88' }, payload: '{}',
+    })));
+    const counts = results.reduce((m, r) => { m[r.statusCode] = (m[r.statusCode] || 0) + 1; return m; }, {});
+    assert.deepStrictEqual(counts, { 401: 5, 429: 2 });
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

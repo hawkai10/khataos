@@ -47,8 +47,8 @@ function check(name, cond, extra = '') {
   else { failed++; console.log(`  FAIL  ${name} ${extra}`); }
 }
 
-async function api(method, p, body, token) {
-  const headers = { 'content-type': 'application/json' };
+async function api(method, p, body, token, extraHeaders = {}) {
+  const headers = { 'content-type': 'application/json', ...extraHeaders };
   if (token) headers.authorization = 'Bearer ' + token;
   const resp = await fetch(BASE + p, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const json = await resp.json();
@@ -289,6 +289,19 @@ async function waitForServer(proc, ms = 20000) {
       }
     }
     check('security: repeated failed logins are rate limited with 429', saw429);
+    // The rate limiter must key on the socket IP, not a client-supplied
+    // X-Forwarded-For (an attacker could rotate the header to reset their
+    // bucket). The bucket is already warm from the loop above, so any attempt
+    // that reaches the handler (401) proves the header was trusted — fail.
+    let xffBypassed = false;
+    for (let i = 0; i < 5; i++) {
+      try {
+        await api('POST', '/api/auth/login', { email: 'nobody@smoke.in', password: 'wrong' }, null, { 'x-forwarded-for': '203.0.113.' + (i + 100) });
+      } catch (e) {
+        if (e.status === 401) xffBypassed = true;
+      }
+    }
+    check('security: rotating X-Forwarded-For cannot bypass the rate limit', !xffBypassed);
 
     console.log(`\n${passed} passed, ${failed} failed`);
   } catch (err) {

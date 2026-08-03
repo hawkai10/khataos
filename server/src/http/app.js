@@ -33,6 +33,16 @@ const PUBLIC_API = new Set([
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_LIMITS = new Map();
 
+// Rate-limit buckets key on the raw socket IP unless an explicit trusted proxy
+// is configured (KHATAOS_TRUST_PROXY=1). X-Forwarded-For is attacker-controlled
+// when the server is reachable directly: trusting it by default would let a
+// client rotate the header and bypass login/OTP brute-force protection. Enable
+// it ONLY behind a proxy that overwrites or strips the client-supplied header
+// (e.g. nginx `proxy_set_header X-Forwarded-For $remote_addr`, or an edge/CDN
+// rule that removes it) — a proxy that merely *appends* (ALB, CloudFront) is
+// not sufficient, because the client value stays first in the list.
+const TRUST_PROXY = process.env.KHATAOS_TRUST_PROXY === '1';
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -45,7 +55,10 @@ const MIME = {
 };
 
 function clientKey(request) {
-  return (request.headers['x-forwarded-for'] || '').split(',')[0].trim() || request.socket.remoteAddress || 'unknown';
+  if (TRUST_PROXY) {
+    return (request.headers['x-forwarded-for'] || '').split(',')[0].trim() || request.socket.remoteAddress || 'unknown';
+  }
+  return request.socket.remoteAddress || 'unknown';
 }
 
 function rateLimited(request, bucket, limit) {

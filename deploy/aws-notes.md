@@ -26,6 +26,14 @@ CloudFront/WAF ──► ALB ──► ECS Fargate (API + SPA, ap-south-1)
 - WAF rules on the ALB; TLS 1.2+; signed download URLs for invoice documents.
 - Network ACLs: API only reachable from ALB; Tally connector uses outbound
   HTTPS to a dedicated endpoint (no inbound ports from customer sites).
+- Login/OTP rate limiting keys on the raw socket IP by default. Do NOT enable
+  `KHATAOS_TRUST_PROXY=1` unless the edge (CloudFront/WAF/ALB) overwrites or
+  strips client-supplied `X-Forwarded-For`; ALB/CloudFront only *append* to it,
+  leaving the attacker-controlled value first, which would let a client rotate
+  the header and bypass brute-force protection. With a header-sanitizing proxy
+  in front (e.g. nginx `proxy_set_header X-Forwarded-For $remote_addr`), set
+  `KHATAOS_TRUST_PROXY=1` so all clients behind the proxy share one real-IP
+  bucket instead of the proxy's single address.
 - Backups: Aurora PITR (35 days), ClickHouse S3 snapshots, S3 versioning for
   invoice store.
 - Audit: every bank consent, approval, payment, and Tally sync writes to the
