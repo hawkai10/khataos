@@ -427,6 +427,102 @@ async function runMigrationsAsync(exec) {
   }
 }
 
+// Versioned migrations: recorded in schema_migrations so each runs exactly
+// once. SQL statements are engine-agnostic (SQLite + PostgreSQL).
+const SCHEMA_MIGRATIONS = [
+  {
+    version: 1,
+    sql: [
+      // De-duplicate invoices (keep the earliest per company + number) before
+      // enforcing uniqueness; dependents are removed first to satisfy FKs.
+      `DELETE FROM invoice_lines WHERE invoice_id IN (
+         SELECT i.id FROM invoices i
+         JOIN (
+           SELECT company_id, invoice_no, MIN(created_at || '|' || id) AS keep_key
+           FROM invoices GROUP BY company_id, invoice_no HAVING COUNT(*) > 1
+         ) d ON d.company_id = i.company_id AND d.invoice_no = i.invoice_no
+         WHERE (i.created_at || '|' || i.id) <> d.keep_key
+       )`,
+      `DELETE FROM approvals WHERE invoice_id IN (
+         SELECT i.id FROM invoices i
+         JOIN (
+           SELECT company_id, invoice_no, MIN(created_at || '|' || id) AS keep_key
+           FROM invoices GROUP BY company_id, invoice_no HAVING COUNT(*) > 1
+         ) d ON d.company_id = i.company_id AND d.invoice_no = i.invoice_no
+         WHERE (i.created_at || '|' || i.id) <> d.keep_key
+       )`,
+      `DELETE FROM invoices WHERE id IN (
+         SELECT i.id FROM invoices i
+         JOIN (
+           SELECT company_id, invoice_no, MIN(created_at || '|' || id) AS keep_key
+           FROM invoices GROUP BY company_id, invoice_no HAVING COUNT(*) > 1
+         ) d ON d.company_id = i.company_id AND d.invoice_no = i.invoice_no
+         WHERE (i.created_at || '|' || i.id) <> d.keep_key
+       )`,
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_company_no ON invoices(company_id, invoice_no)',
+    ],
+  },
+  {
+    version: 2,
+    // Index-only migration: best-effort so a missing column on an old table
+    // can never block boot; the index is recreated on the next version bump.
+    bestEffort: true,
+    sql: [
+      'CREATE INDEX IF NOT EXISTS idx_invoices_company_status ON invoices(company_id, status)',
+      'CREATE INDEX IF NOT EXISTS idx_invoices_company_date ON invoices(company_id, invoice_date)',
+      'CREATE INDEX IF NOT EXISTS idx_btx_company_matched ON bank_transactions(company_id, matched, status, txn_date)',
+      'CREATE INDEX IF NOT EXISTS idx_btx_company_txndate ON bank_transactions(company_id, txn_date)',
+      'CREATE INDEX IF NOT EXISTS idx_gst_mm_company_status ON gst_mismatches(company_id, status)',
+      'CREATE INDEX IF NOT EXISTS idx_tv_company_type ON tally_vouchers(company_id, voucher_type, cancelled)',
+      'CREATE INDEX IF NOT EXISTS idx_tv_company_date ON tally_vouchers(company_id, date)',
+      'CREATE INDEX IF NOT EXISTS idx_g2b_company_period ON gstr2b_snapshots(company_id, period)',
+      'CREATE INDEX IF NOT EXISTS idx_cd_account_date ON cash_daily(account_id, date)',
+      'CREATE INDEX IF NOT EXISTS idx_payments_company_status ON payments(company_id, status)',
+      'CREATE INDEX IF NOT EXISTS idx_audit_company_at ON audit_logs(company_id, at)',
+      'CREATE INDEX IF NOT EXISTS idx_vendors_company_active ON vendors(company_id, active)',
+    ],
+  },
+];
+
+function runVersionedMigrations(exec, query) {
+  exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  const applied = new Set((query('SELECT version FROM schema_migrations') || []).map((r) => r.version));
+  for (const m of SCHEMA_MIGRATIONS) {
+    if (applied.has(m.version)) continue;
+    exec('BEGIN');
+    try {
+      for (const sql of m.sql) {
+        try { exec(sql); } catch (err) { if (!m.bestEffort) throw err; }
+      }
+      exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (${m.version}, '${new Date().toISOString()}')`);
+      exec('COMMIT');
+    } catch (err) {
+      exec('ROLLBACK');
+      throw err;
+    }
+  }
+}
+
+async function runVersionedMigrationsAsync(exec, query) {
+  await exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  const rows = await query('SELECT version FROM schema_migrations');
+  const applied = new Set((rows || []).map((r) => r.version));
+  for (const m of SCHEMA_MIGRATIONS) {
+    if (applied.has(m.version)) continue;
+    await exec('BEGIN');
+    try {
+      for (const sql of m.sql) {
+        try { await exec(sql); } catch (err) { if (!m.bestEffort) throw err; }
+      }
+      await exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (${m.version}, '${new Date().toISOString()}')`);
+      await exec('COMMIT');
+    } catch (err) {
+      await exec('ROLLBACK');
+      throw err;
+    }
+  }
+}
+
 // PostgreSQL flavour: amounts as double precision so they return as JS numbers
 // (identical to SQLite REAL semantics); flags stay INTEGER so `= 1` checks
 // keep working; dates/timestamps stay TEXT for identical formatting.
@@ -453,6 +549,7 @@ if (DB_ENGINE === 'sqlite') {
     sqliteDb.exec('PRAGMA foreign_keys = ON;');
     sqliteDb.exec(SCHEMA);
     runMigrations((sql) => sqliteDb.exec(sql));
+    runVersionedMigrations((sql) => sqliteDb.exec(sql), (sql) => sqliteDb.prepare(sql).all());
   } catch (err) {
     const fallbackDir = path.join(os.tmpdir(), 'khataos-data');
     fs.mkdirSync(fallbackDir, { recursive: true });
@@ -466,6 +563,7 @@ if (DB_ENGINE === 'sqlite') {
     sqliteDb.exec('PRAGMA foreign_keys = ON;');
     sqliteDb.exec(SCHEMA);
     runMigrations((sql) => sqliteDb.exec(sql));
+    runVersionedMigrations((sql) => sqliteDb.exec(sql), (sql) => sqliteDb.prepare(sql).all());
     console.warn(`[db] Could not open ${PRIMARY_DB} (${err.message}). Using ${DB_PATH} instead.`);
   }
   impl = {
@@ -484,6 +582,7 @@ if (DB_ENGINE === 'sqlite') {
       client = new Pool({ connectionString: DATABASE_URL, max: 10 });
       await client.query(PG_SCHEMA);
       await runMigrationsAsync((sql) => client.query(sql));
+      await runVersionedMigrationsAsync((sql) => client.query(sql), (sql) => client.query(sql).then((r) => r.rows));
       impl = {
         all: async (sql, params) => (await client.query(translate(sql), params)).rows,
         get: async (sql, params) => (await client.query(translate(sql), params)).rows[0] || null,
@@ -499,6 +598,7 @@ if (DB_ENGINE === 'sqlite') {
       DB_PATH = pgliteDir || '(in-memory pglite)';
       await client.exec(PG_SCHEMA);
       await runMigrationsAsync((sql) => client.exec(sql));
+      await runVersionedMigrationsAsync((sql) => client.exec(sql), async (sql) => (await client.query(sql)).rows);
       impl = {
         all: async (sql, params) => (await client.query(translate(sql), params)).rows,
         get: async (sql, params) => (await client.query(translate(sql), params)).rows[0] || null,

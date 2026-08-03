@@ -454,6 +454,15 @@ async function processEmail(mailId) {
   const cgst = ocr.cgst || 0, sgst = ocr.sgst || 0, igst = ocr.igst || 0;
   const tds = ocr.tds_amount || 0;
   const gross = ocr.grand_total != null ? ocr.grand_total : taxable + cgst + sgst + igst;
+  // Idempotent capture: a supplier invoice forwarded twice must not create a
+  // duplicate row (company + invoice number are unique).
+  const existing = ocr.invoice_no
+    ? await get('SELECT * FROM invoices WHERE company_id = ? AND invoice_no = ?', [mail.company_id, ocr.invoice_no])
+    : null;
+  if (existing) {
+    await run(`UPDATE email_inbox SET processed = 1, invoice_id = ? WHERE id = ?`, [existing.id, mailId]);
+    return existing;
+  }
   await insert('invoices', {
     id: invId, company_id: mail.company_id,
     invoice_no: ocr.invoice_no || 'MAN-' + String(Date.now()).slice(-6),

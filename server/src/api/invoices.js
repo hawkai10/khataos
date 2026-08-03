@@ -76,6 +76,8 @@ function register(r, deps) {
     const tdsRate = vendor ? vendor.tds_rate : 0;
     const tds = inr(gross * tdsRate);
     if (!fields.invoice_no) throw new ApiError(400, 'invoice_no required');
+    const existing = await get('SELECT id FROM invoices WHERE company_id = ? AND invoice_no = ?', [coId, String(fields.invoice_no).trim()]);
+    if (existing) throw new ApiError(409, 'invoice_no already exists');
     const invId = uid('inv');
     await insert('invoices', {
       id: invId, company_id: coId, invoice_no: String(fields.invoice_no).trim(),
