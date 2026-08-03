@@ -93,7 +93,7 @@ function register(r, deps) {
   r.post('/api/cash/refresh', async (req, res, p, user) => {
     const coId = companyOf(user);
     const accounts = await Cash.activeAccounts(coId);
-    let added = 0, decentroAdded = 0;
+    let added = 0, decentroAdded = 0, skipped = 0;
     const decentroAccounts = [];
     for (const a of accounts) {
       if (a.source === 'decentro') {
@@ -101,10 +101,16 @@ function register(r, deps) {
           decentroAccounts.push(a);
           const result = await Decentro.pull(coId, a, { recentOnly: true });
           decentroAdded += result.inserted;
-        }
+        } else skipped++;
         continue;
       }
-      const txns = await BankDataProvider.refresh(coId, a);
+      let txns;
+      try {
+        txns = await BankDataProvider.refresh(coId, a);
+      } catch (err) {
+        skipped++; // provider unconfigured or failed; never fabricate data
+        continue;
+      }
       for (const t of txns) {
         const exists = await get('SELECT id FROM bank_transactions WHERE account_id = ? AND external_id = ?', [a.id, t.external_id]);
         if (exists) continue;
@@ -120,7 +126,7 @@ function register(r, deps) {
     const stats = await recon.matchAll(coId);
     const voucherMatched = await recon.autoVoucherMatch(coId, 7);
     await TallyConnector.heartbeat(coId);
-    ok(res, { added_transactions: added, decentro_transactions: decentroAdded, decentro_accounts: decentroAccounts.length, voucher_matched: voucherMatched, recon: stats });
+    ok(res, { added_transactions: added, decentro_transactions: decentroAdded, decentro_accounts: decentroAccounts.length, skipped_accounts: skipped, voucher_matched: voucherMatched, recon: stats });
   });
 
   // ---- Decentro Connected Banking (real bank data API) ----

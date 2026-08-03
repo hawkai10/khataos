@@ -65,7 +65,7 @@ the ITC scan always has real flags). To fetch **real** GSTR-2B data, set the
 tenant's GSTN/GSP credentials and restart:
 
 ```powershell
-$env:GSTN_GSTIN = "29AABCA1234F1Z5"
+$env:GSTN_GSTIN = "your-gstin"
 $env:GSTN_USERNAME = "..." ; $env:GSTN_APP_KEY = "..."
 $env:GSTN_CLIENT_ID = "..." ; $env:GSTN_CLIENT_SECRET = "..."
 node server/src/server.js
@@ -104,16 +104,11 @@ validates every reference (group → ledger → voucher), then imports in the
 correct sequence, deduplicated per company. Details:
 [docs/tally-connector.md](docs/tally-connector.md).
 
-| Role | Email | Password | Can do |
-| --- | --- | --- | --- |
-| CFO / Admin | `cfo@acme.in` | `demo1234` | Everything, including > ₹1L approvals |
-| Finance Manager | `manager@acme.in` | `demo1234` | Approve invoices ≤ ₹1L, payments ≤ ₹5L, reconcile |
-| Finance Executive | `exec@acme.in` | `demo1234` | Capture invoices, create/schedule payments, view |
-
-The database is auto-seeded on first run with a demo company (Acme Industries,
-GSTIN `29AABCA1234F1Z5`), 6 bank accounts across 5 banks, 30 days of cash
-history, vendors, invoices in every workflow state, payments, GSTR-2B data,
-and Tally sync state — everything needed to demo all 7 modules immediately.
+There is no demo tenant: the database starts empty apart from the supported
+bank directory (reference data). Data only enters through the real channels —
+Tally XML imports, connected-bank statements, GSTR-2B fetches and forwarded
+invoices. Create your own company and users, then connect providers
+(see `.env.example`).
 
 ### Database engines
 

@@ -13,8 +13,8 @@
 // Staging: https://in.staging.decentro.tech
 //
 // The adapter activates automatically when the environment variables are set;
-// otherwise the UI/API reports it as not configured and the deterministic
-// simulator (mock AA) remains the demo provider.
+// otherwise the UI/API reports it as not configured and refuses to fabricate
+// data.
 // ============================================================================
 
 const { db, insert, get, all, run } = require('./db');

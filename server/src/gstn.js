@@ -14,15 +14,12 @@
 //           headers gstin/client_id/client_secret/user_name/txn
 //
 // Modes:
-//   mock (default) — generates a realistic GSP-shaped GSTR-2B payload from
-//                    platform invoices so the full pipeline (auth -> fetch ->
-//                    map -> mismatch scan) is exercised identically.
-//   live           — real HTTP against GSTN_GSP_BASE_URL when credentials are
-//                    present (GSTN_MOCK=1 forces mock for sandbox testing).
+//   live     — real HTTP against GSTN_GSP_BASE_URL when credentials are set.
+//   disabled — no credentials; every call is refused (503) so no simulated
+//              GSTR-2B payload can enter the system.
 // ============================================================================
 
-const { all } = require('./db');
-const { todayStr, daysAgo, inr, uid, nowIso, addDays } = require('./util');
+const { todayStr, inr, nowIso } = require('./util');
 
 const BASE_URL = (process.env.GSTN_GSP_BASE_URL || 'https://api.setu.co/gstn').replace(/\/$/, '');
 const EINV_BASE = (process.env.GSTN_EINVOICE_BASE_URL || 'https://einvoice1.gst.gov.in').replace(/\/$/, '');
@@ -41,7 +38,13 @@ const CFG = {
 
 const stateCd = () => (CFG.gstin || '00').slice(0, 2);
 const hasCreds = () => !!(CFG.gstin && CFG.username && CFG.app_key && CFG.client_id && CFG.client_secret);
-const mode = () => (hasCreds() && process.env.GSTN_MOCK !== '1' ? 'live' : 'mock');
+const mode = () => (hasCreds() ? 'live' : 'disabled');
+
+function notConfigured() {
+  const err = new Error('GSTN not configured — set GSTN_GSTIN, GSTN_USERNAME, GSTN_APP_KEY, GSTN_CLIENT_ID and GSTN_CLIENT_SECRET (see .env.example)');
+  err.status = 503;
+  return err;
+}
 
 function config() {
   const missing = ['GSTN_GSTIN', 'GSTN_USERNAME', 'GSTN_APP_KEY', 'GSTN_CLIENT_ID', 'GSTN_CLIENT_SECRET'].filter(k => !process.env[k]);
@@ -63,10 +66,7 @@ function config() {
 let auth = { token: null, expiresAt: 0, otpRef: null };
 
 async function requestOtp() {
-  if (mode() === 'mock') {
-    auth.otpRef = 'OTP-' + String(Date.now()).slice(-8);
-    return { status: 'OTP_REQUESTED', otp_ref: auth.otpRef, gstin: CFG.gstin || '(demo)', mode: 'mock', note: 'Simulated — any 6-digit OTP validates in mock mode' };
-  }
+  if (!hasCreds()) throw notConfigured();
   const resp = await fetch(BASE_URL + OTP_PATH, {
     method: 'POST',
     headers: gspHeaders(),
@@ -80,12 +80,7 @@ async function requestOtp() {
 
 async function validateOtp(otp) {
   const code = String(otp || '').trim();
-  if (mode() === 'mock') {
-    if (!/^\d{6}$/.test(code)) throw Object.assign(new Error('OTP must be 6 digits'), { status: 400 });
-    auth.token = 'MOCK-AUTH-' + code + '-' + Date.now().toString(36);
-    auth.expiresAt = Date.now() + 360 * 60000;
-    return { status: 'AUTHENTICATED', mode: 'mock', expiry_minutes: 360, auth_token: mask(auth.token) };
-  }
+  if (!hasCreds()) throw notConfigured();
   if (!auth.otpRef) throw Object.assign(new Error('Request an OTP first (POST /api/gstn/otp/request)'), { status: 400 });
   const resp = await fetch(BASE_URL + AUTH_PATH, {
     method: 'POST',
@@ -118,7 +113,7 @@ function gspHeaders(extra = {}) {
 }
 
 function requireAuth() {
-  if (mode() !== 'live') return;
+  if (!hasCreds()) throw notConfigured();
   if (!auth.token || auth.expiresAt < Date.now()) {
     throw Object.assign(new Error('GSTN auth token missing or expired — request an OTP and validate first'), { status: 401 });
   }
@@ -128,7 +123,7 @@ function requireAuth() {
 // Live: GET {GSTR2B_PATH}/{gstin} (GSP-specific query params for period).
 // Mock: build a realistic GSP-shaped payload from platform invoices.
 async function fetchGstr2bRaw(companyId, period, gstin) {
-  if (mode() === 'mock') return buildMockPayload(companyId, period, gstin);
+  if (!hasCreds()) throw notConfigured();
   requireAuth();
   const resp = await fetch(`${BASE_URL}${GSTR2B_PATH}/${encodeURIComponent(gstin)}?fp=${period}`, {
     method: 'GET',
@@ -137,32 +132,6 @@ async function fetchGstr2bRaw(companyId, period, gstin) {
   const json = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(`GSTR-2B fetch failed (${resp.status}): ${json.message || json.error || resp.statusText}`);
   return json;
-}
-
-// Deterministic mock: supplier-side reality — first invoice not yet reflected,
-// second differs by 12%, matching the previous simulation so the mismatch scan
-// always produces real flags. Output uses the GSP `b2b` row shape.
-async function buildMockPayload(companyId, period, gstin) {
-  const monthStart = period + '-01';
-  const monthEnd = addDays(monthStart, 31).slice(0, 10);
-  const invs = await all(`SELECT * FROM invoices WHERE company_id = ? AND invoice_date >= ? AND invoice_date <= ? AND gstin_vendor IS NOT NULL`,
-    [companyId, monthStart, monthEnd]);
-  const b2b = [];
-  invs.forEach((i, idx) => {
-    if (idx === 0) return; // supplier invoice not reflected in GSTR-2B yet
-    let cgst = i.cgst || 0, sgst = i.sgst || 0, igst = i.igst || 0;
-    if (idx === 1) { cgst = inr(cgst * 0.88); sgst = inr(sgst * 0.88); igst = inr(igst * 0.88); }
-    b2b.push({
-      ctin: i.gstin_vendor,
-      docno: i.invoice_no,
-      docdt: i.invoice_date,
-      supfildt: i.invoice_date,
-      txval: i.taxable_amount,
-      cgst, sgst, igst, cess: i.cess || 0,
-      itcAvailed: { itcCgst: cgst, itcSgst: sgst, itcIgst: igst },
-    });
-  });
-  return { gstin, fp: period, b2b, cdnr: [], isda: [], itcAvailed: { itcCgst: 0, itcSgst: 0, itcIgst: 0 }, createdAt: nowIso() };
 }
 
 // Pure mapper: GSP GSTR-2B payload -> our snapshot rows (invoice_no, gstin,
@@ -209,21 +178,21 @@ function mapGstr2b(payload, opts = {}) {
     invoices,
     cdnr,
     credit_notes: cdnr.length,
-    source: mode() === 'live' ? 'gstn-live' : 'gstn-simulated',
+    source: 'gstn-live',
     fetched_at: nowIso(),
   };
 }
 
 // ---- e-invoice (IRP) contract stub ----
 function buildEinvoiceBody(inv, opts = {}) {
-  const seller = opts.seller || { gstin: CFG.gstin, name: 'Acme Industries Pvt Ltd', addr: 'Bengaluru, Karnataka 560001' };
+  const seller = opts.seller || { gstin: CFG.gstin, name: 'Seller Company Pvt Ltd', addr: 'Bengaluru, Karnataka 560001' };
   const buyer = opts.buyer || { gstin: inv.gstin_vendor || '', name: inv.vendor_name || 'Buyer', addr: '' };
   const items = Array.isArray(inv.lines) && inv.lines.length ? inv.lines : [{ hsn: '9988', description: 'Goods & services', qty: 1, rate: inv.taxable_amount || 0, taxable: inv.taxable_amount || 0, cgst: inv.cgst || 0, sgst: inv.sgst || 0, igst: inv.igst || 0 }];
   return {
     Version: '1.03',
     TranDtls: { SupTyp: 'B2B', RegRev: 'N', EcmGstin: '', IgstOnIntra: 'N' },
     DocDtls: { Typ: 'INV', No: inv.invoice_no, Dt: inv.invoice_date },
-    SellerDtls: { Gstin: seller.gstin, LglNm: seller.name, TrdNm: seller.name, Addr1: seller.addr, Loc: 'Bengaluru', Pin: 560001, StCd: 29, Ph: '0800000000', Em: 'finance@acme.in' },
+    SellerDtls: { Gstin: seller.gstin, LglNm: seller.name, TrdNm: seller.name, Addr1: seller.addr, Loc: 'Bengaluru', Pin: 560001, StCd: 29, Ph: '0800000000', Em: 'finance@company.in' },
     BuyerDtls: { Gstin: buyer.gstin, LglNm: buyer.name, TrdNm: buyer.name, Addr1: buyer.addr || 'Registered Address', Loc: '', Pin: 0, StCd: 0, Ph: '', Em: '' },
     ItemList: items.map((l, i) => ({
       SlNo: i + 1, PrdDesc: l.description || 'Goods & services', HsnCd: String(l.hsn || '9988'), Barcde: '',
@@ -240,15 +209,7 @@ function buildEinvoiceBody(inv, opts = {}) {
 }
 
 async function generateIrn(invoice) {
-  if (mode() === 'mock') {
-    const body = buildEinvoiceBody(invoice);
-    const hash = require('crypto').createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 20).toUpperCase();
-    return {
-      irn: 'IRN-' + hash, irp_status: 'IRN_GENERATED', mode: 'mock',
-      signed_qr_code: '(simulated)', signed_invoice: '(simulated)',
-      irp_ack: 'simulated — live call posts to ' + EINV_BASE + '/einv/v1.0/irn/generate',
-    };
-  }
+  if (!hasCreds()) throw notConfigured();
   requireAuth();
   const body = buildEinvoiceBody(invoice);
   const resp = await fetch(EINV_BASE + '/einv/v1.0/irn/generate', {

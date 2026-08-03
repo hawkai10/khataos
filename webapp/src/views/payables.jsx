@@ -184,7 +184,6 @@ function CaptureDialog({ onDone }) {
     vendor_id: '', invoice_no: '', invoice_date: '', due_date: '',
     taxable_amount: '', cgst: '', sgst: '', igst: '', gross_amount: '', tds_amount: '', gstin_vendor: '',
   });
-  const [template, setTemplate] = useState('cement');
   const [ocrText, setOcrText] = useState('');
   const [ocrResult, setOcrResult] = useState(null);
 
@@ -218,20 +217,6 @@ function CaptureDialog({ onDone }) {
     }
   }
 
-  async function emailSim() {
-    setBusy(true);
-    try {
-      const r = await post('/api/invoices/email-sim', { template });
-      toast.success(`Captured ${r.invoice.invoice_no} from email`);
-      setOpen(false);
-      onDone();
-    } catch (e) {
-      toast.error(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function runOcr() {
     try {
       setOcrResult(await post('/api/invoices/ocr-preview', { text: ocrText }));
@@ -248,13 +233,12 @@ function CaptureDialog({ onDone }) {
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>Capture invoice</DialogTitle>
-          <DialogDescription>Manual entry, email forwarding demo, or OCR pre-fill from pasted invoice text.</DialogDescription>
+          <DialogDescription>Manual entry or OCR pre-fill from pasted invoice text.</DialogDescription>
         </DialogHeader>
 
         <Tabs value={mode} onValueChange={setMode}>
           <TabsList className="w-full">
             <TabsTrigger value="manual" className="flex-1">Manual entry</TabsTrigger>
-            <TabsTrigger value="email" className="flex-1">Email demo</TabsTrigger>
             <TabsTrigger value="ocr" className="flex-1"><ScanText className="mr-1 h-3.5 w-3.5" /> OCR pre-fill</TabsTrigger>
           </TabsList>
 
@@ -283,23 +267,9 @@ function CaptureDialog({ onDone }) {
             </DialogFooter>
           </TabsContent>
 
-          <TabsContent value="email" className="space-y-3">
-            <div className="space-y-1.5">
-              <Label>Sample vendor invoice</Label>
-              <Select value={template} onChange={(e) => setTemplate(e.target.value)}>
-                <option value="cement">Shree Cement Traders</option>
-                <option value="apex">Apex Steel Works</option>
-                <option value="freight">Global Freight LLP</option>
-              </Select>
-            </div>
-            <p className="text-xs text-muted-foreground">Simulates the email-forwarding flow (forward to <span className="font-medium">forward@invoices.khataos.in</span>). OCR extracts GSTIN, HSNs and tax fields automatically.</p>
-            <DialogFooter><Button onClick={emailSim} disabled={busy}>{busy ? 'Capturing…' : 'Simulate forwarded email'}</Button></DialogFooter>
-          </TabsContent>
-
           <TabsContent value="ocr" className="space-y-3">
-            <Textarea value={ocrText} onChange={(e) => setOcrText(e.target.value)} placeholder="Paste invoice text (or use the sample)…" className="min-h-28" />
+            <Textarea value={ocrText} onChange={(e) => setOcrText(e.target.value)} placeholder="Paste the OCR text from a real invoice…" className="min-h-28" />
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => setOcrText('GSTIN: 29AABCS2345K1Z2\nInvoice No: INV-2026-119\nInvoice Date: 03/08/2026\nTaxable Amount: 18,50,000.00\nCGST: 1,58,760.00  SGST: 1,66,500.00\nGrand Total: 21,19,010.00')}>Load sample</Button>
               <Button size="sm" onClick={runOcr}><ScanText className="h-3.5 w-3.5" /> Extract fields</Button>
             </div>
             {ocrResult ? (

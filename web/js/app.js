@@ -24,13 +24,6 @@ const App = {
         this.showApp();
       } catch (err) { UI.toast(err.message, 'err'); }
     });
-    document.querySelectorAll('.demo-users .chip').forEach(chip => {
-      chip.addEventListener('click', () => {
-        document.getElementById('login-email').value = chip.dataset.email;
-        document.getElementById('login-password').value = 'demo1234';
-        loginForm.requestSubmit();
-      });
-    });
     document.getElementById('logout-btn').addEventListener('click', () => {
       API.logout();
       this.showLogin();
@@ -109,7 +102,7 @@ App.VIEWS = {};
 
 App.VIEWS.dashboard = {
   title: 'CFO Dashboard',
-  sub: 'Acme Industries Pvt Ltd · GSTIN 29AABCA1234F1Z5 · Bengaluru',
+  sub: 'Cash, payments and compliance at a glance',
   async render(el) {
     const d = await API.get('/api/dashboard');
     const kpis = [
@@ -316,11 +309,11 @@ async function decentroFlow(bankCode, accountNumber) {
       <div class="form-grid">
         <div class="field"><label>Account number</label><input id="d-acc" value="${UI.esc(accountNumber)}" disabled></div>
         <div class="field"><label>Bank</label><input value="${UI.esc(bankCode)}" disabled></div>
-        <div class="field"><label>Account name</label><input id="d-name" placeholder="e.g. Acme Industries Pvt Ltd"></div>
+        <div class="field"><label>Account name</label><input id="d-name" placeholder="e.g. Company Name Pvt Ltd"></div>
         <div class="field"><label>IFSC</label><input id="d-ifsc" placeholder="ICIC0000022"></div>
         <div class="field"><label>PAN (business)</label><input id="d-pan" placeholder="AABCA1234F" maxlength="10"></div>
         <div class="field"><label>Mobile (registered)</label><input id="d-mobile" placeholder="98XXXXXXXX" maxlength="10"></div>
-        <div class="field"><label>Email</label><input id="d-email" type="email" placeholder="finance@acme.in"></div>
+        <div class="field"><label>Email</label><input id="d-email" type="email" placeholder="finance@company.in"></div>
         <div class="field"><label>Customer ID (Decentro)</label><input id="d-customer" placeholder="optional"></div>
       </div>
       <p class="hint">Provider parameters (${bankCode === 'ICIC' ? 'ICICI: Corp ID, User ID, Alias ID' : 'Netbanking User ID'}):</p>
@@ -483,39 +476,24 @@ function captureModal(mode) {
     UI.openModal(`
       <div class="modal-head"><h3>Invoice capture — email forwarding</h3></div>
       <div class="modal-body">
-        <p>Set your forwarding rule once: <strong>invoices@acme.in → forward@invoices.khataos.in</strong>. Any invoice forwarded here is OCR'd and pushed into the approval queue.</p>
-        <div class="field"><label>Template</label>
-          <select id="sim-template">
-            <option value="cement">Shree Cement Traders (raw material)</option>
-            <option value="apex">Apex Steel Works (mismatch demo)</option>
-            <option value="freight">Global Freight LLP (logistics)</option>
-          </select>
-        </div>
-        <p class="hint">Simulates a forwarded email with a PDF attachment. OCR extracts GSTIN, HSN lines, CGST/SGST, TDS and due date.</p>
+        <p>Set your forwarding rule once in your mail client: <strong>invoices@yourcompany.in → forward@invoices.khataos.in</strong>. Any invoice forwarded here is OCR'd and pushed into the approval queue automatically.</p>
+        <p class="hint">No sample emails exist — forwarding a real supplier invoice triggers capture.</p>
       </div>
-      <div class="modal-foot"><button class="btn ghost" onclick="UI.closeModal()">Cancel</button><button class="btn primary" id="sim-send">Simulate forward</button></div>`);
-    document.getElementById('sim-send').onclick = async () => {
-      try {
-        const template = document.getElementById('sim-template').value;
-        const r = await API.post('/api/invoices/email-sim', { template });
-        UI.closeModal();
-        UI.toast(`Invoice ${r.invoice.invoice_no} captured · OCR ${Math.round(r.ocr.confidence * 100)}% · ${r.three_way_match.status}`);
-        App.navigate('payables');
-      } catch (err) { UI.toast(err.message, 'err'); }
-    };
+      <div class="modal-foot"><button class="btn primary" onclick="UI.closeModal()">Got it</button></div>`);
     return;
   }
   if (mode === 'pdf') {
     UI.openModal(`
       <div class="modal-head"><h3>Invoice capture — PDF upload</h3></div>
       <div class="modal-body">
-        <p>In production you'd upload a PDF and our OCR engine (trained on Indian GST invoice formats) extracts the fields. Demo: process a sample Apex Steel invoice PDF.</p>
-        <div class="field"><label>Attach PDF</label><input type="file" accept="application/pdf" disabled><div class="hint">File picker disabled in demo — sample document used.</div></div>
+        <p>Paste the OCR text extracted from the PDF (our OCR engine is trained on Indian GST invoice formats) and the invoice will be captured.</p>
+        <div class="field"><label>OCR text</label><textarea id="pdf-text" rows="8" placeholder="Supplier, GSTIN, invoice no, taxable value, CGST/SGST/IGST, TDS, grand total…"></textarea></div>
       </div>
       <div class="modal-foot"><button class="btn ghost" onclick="UI.closeModal()">Cancel</button><button class="btn primary" id="pdf-ocr">Run OCR</button></div>`);
     document.getElementById('pdf-ocr').onclick = async () => {
       try {
-        const inv = await API.post('/api/invoices/capture', { source: 'pdf' });
+        const text = document.getElementById('pdf-text').value;
+        const inv = await API.post('/api/invoices/capture', { source: 'pdf', text });
         UI.closeModal();
         UI.toast(`Extracted ${inv.invoice_no} · pending approval`);
         App.navigate('payables');
@@ -1067,11 +1045,10 @@ App.VIEWS.onboarding = {
         }, 'Install (demo)');
       }
       if (step === 'email_routing') {
-        UI.confirm('Email forwarding', 'Set the rule invoices@acme.in → forward@invoices.khataos.in and send a sample invoice to prove capture. Demo now?', async () => {
+        UI.confirm('Email forwarding', 'Set your forwarding rule (invoices@yourcompany.in → forward@invoices.khataos.in). Forwarded invoices are OCR\u2019d and pushed into the approval queue.', async () => {
           await API.post('/api/onboarding/email_routing/complete', { detail: 'forward@invoices.khataos.in active' });
-          const r = await API.post('/api/invoices/email-sim', { template: 'freight' });
-          UI.toast(`Rule live — captured ${r.invoice.invoice_no}`); App.navigate('onboarding');
-        }, 'Simulate forward');
+          UI.toast('Email routing marked complete'); App.navigate('onboarding');
+        }, 'Mark complete');
       }
       if (step === 'vendor_import') {
         UI.confirm('Vendor import', 'Pull ledgers, GSTINs, TDS sections and bank details from Tally into the KhataOS vendor master. Demo now?', async () => {

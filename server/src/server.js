@@ -103,7 +103,9 @@ const server = http.createServer(async (req, res) => {
     }
     serveStatic(req, res, url.pathname);
   } catch (err) {
-    const status = err instanceof ApiError ? err.status : 500;
+    // Respect provider errors that carry an HTTP status (e.g. 503 when an
+    // integration is unconfigured, 502 for upstream failures).
+    const status = err instanceof ApiError ? err.status : (Number.isInteger(err.status) ? err.status : 500);
     if (status === 500) console.error('[error]', err);
     if (!res.headersSent) {
       res.writeHead(status, { 'content-type': 'application/json' });
@@ -116,6 +118,6 @@ const server = http.createServer(async (req, res) => {
   await seedIfEmpty();
   server.listen(PORT, () => {
     console.log(`KhataOS MVP running: http://localhost:${PORT}`);
-    console.log('Demo logins: cfo@acme.in / manager@acme.in / exec@acme.in (password: demo1234)');
+    console.log('Reference data seeded. No demo tenant is created — data only arrives through the real channels (Tally XML, bank statements, GSTR-2B, forwarded invoices).');
   });
 })();

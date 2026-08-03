@@ -2,13 +2,15 @@
 
 // ============================================================================
 // Integration adapters — every external system behind one interface.
-// Each adapter has a MOCK implementation that is deterministic and realistic
-// (Indian banks, modes, narrations, GSTINs, Tally semantics). Swapping in the
-// real provider = implementing the same interface and flipping a config flag.
+// Adapters only talk to real providers and are disabled (503) until the
+// matching credentials are configured — no fabricated transactions, consents,
+// payment outcomes, GSTR-2B payloads or sample invoices exist in the codebase.
+// (PAYMENT_GATEWAY=test enables a CI-only gateway double that changes payment
+// status without inventing bank data; see PaymentGateway below.)
 // ============================================================================
 
 const { db, insert, update, run, all, get } = require('./db');
-const { mulberry32, uid, nowIso, todayStr, daysAgo, addDays, inr, shortRef } = require('./util');
+const { uid, nowIso, todayStr, daysAgo, addDays, inr } = require('./util');
 const Gstn = require('./gstn');
 const Tally = require('./tally');
 const TallyMapping = require('./tally-mapping');
@@ -67,172 +69,62 @@ const queue = new JobQueue();
 // ----------------------------------------------------------------------------
 // BANK DATA PROVIDER (Account Aggregator + direct APIs)
 // ----------------------------------------------------------------------------
-const AA_CONSENTS = new Map(); // consentId -> {companyId, accountId, bankCode, status}
+function notConfigured(name) {
+  const err = new Error(`${name} not configured — set the provider credentials (see .env.example)`);
+  err.status = 503;
+  return err;
+}
+
+// TODO(real-aa): implement the Sahamati AA / direct-bank consent + statement
+// APIs here. Until credentials exist (AA_CLIENT_ID/AA_CLIENT_SECRET or the
+// bank's direct API keys), every call is refused so no fake data can enter.
+const AA_ENABLED = !!(process.env.AA_CLIENT_ID && process.env.AA_CLIENT_SECRET);
 
 const BankDataProvider = {
-  name: 'mock-aa-sahamati',
+  name: 'aa-sahamati',
 
-  // Step 1: start consent (FIU -> AA network). Returns consent id + fake Aadhaar link.
   startConsent(companyId, bankCode, accountNumber) {
-    const consentId = 'AA-CONSENT-' + String(Math.floor(Math.random() * 90000000) + 10000000);
-    AA_CONSENTS.set(consentId, { companyId, bankCode, accountNumber, status: 'pending_otp' });
-    return { consentId, status: 'pending_otp', otpSentTo: '+91-98XXXXXX12', expiresAt: new Date(Date.now() + 15 * 60000).toISOString() };
+    if (!AA_ENABLED) throw notConfigured('Account Aggregator (AA)');
+    // TODO(real-aa): POST to the FIU -> AA consent request API.
+    throw notConfigured('Account Aggregator (AA)');
   },
 
-  // Step 2: verify OTP (any 6-digit OTP passes in mock)
   verifyConsent(consentId, otp) {
-    const c = AA_CONSENTS.get(consentId);
-    if (!c) throw new Error('Invalid consent id');
-    if (!/^\d{6}$/.test(String(otp))) throw new Error('OTP must be 6 digits');
-    c.status = 'approved';
-    return { consentId, status: 'approved', dataAccess: 'balance+transactions', durationDays: 365 };
+    if (!AA_ENABLED) throw notConfigured('Account Aggregator (AA)');
+    // TODO(real-aa): poll the AA consent status / verify the OTP flow.
+    throw notConfigured('Account Aggregator (AA)');
   },
 
-  // Fetch bank transactions for an account (mock: generated deterministic history)
   async fetchTransactions(companyId, account, opts = {}) {
-    return generateAccountHistory(companyId, account, opts);
+    if (!AA_ENABLED) throw notConfigured('Account Aggregator (AA)');
+    // TODO(real-aa): fetch balance + statement and persist bank_transactions /
+    // cash_daily exactly like Decentro.pull does.
+    throw notConfigured('Account Aggregator (AA)');
   },
 
   async refresh(companyId, account) {
-    const txns = await generateAccountHistory(companyId, account, { recentOnly: true });
+    const txns = await this.fetchTransactions(companyId, account, { recentOnly: true });
     await update('bank_accounts', account.id, { last_synced_at: nowIso(), status: 'active' });
     return txns;
   },
 };
 
-// Deterministic 90-day transaction history for an account.
-async function generateAccountHistory(companyId, account, opts = {}) {
-  const rng = mulberry32(hashCode(account.account_number));
-  const dayCount = opts.recentOnly ? 7 : 90;
-  const startBalance = account.opening_balance != null ? account.opening_balance : 800000 + rng() * 3400000;
-  let balance = startBalance;
-  const txns = [];
-  const vendorNames = ['Shree Cement Traders', 'Kumar Logistics', 'Apex Steel Works', 'Mehta Packaging', 'Global Freight LLP', 'Vijay Electricals', 'Sai Traders & Co'];
-  const customerNames = ['Nexus Retail Pvt Ltd', 'City Mart Distributors', 'Bharat Pharma', 'Reliance Digital Outlets', 'Sunrise Agro', 'Metro Superstores'];
-  const expenseNotes = ['RENT-PAYMENT', 'ELECTRICITY BILL', 'FUEL-DIESEL', 'COURIER CHARGES', 'OFFICE SUPPLIES', 'PEST CONTROL', 'FIRE SAFETY RENEWAL', 'INTERNET BILL'];
-
-  for (let d = -dayCount + 1; d <= 0; d++) {
-    const date = daysAgo(Math.abs(d));
-    const n = 1 + Math.floor(rng() * 3);
-    for (let i = 0; i < n; i++) {
-      const r = rng();
-      let amount, mode, desc, status = 'posted';
-      if (r < 0.32) {
-        // customer receipt
-        amount = inr((200000 + rng() * 2200000) * 100) / 100;
-        mode = rng() < 0.55 ? 'NEFT' : rng() < 0.8 ? 'RTGS' : 'UPI';
-        desc = `${mode === 'UPI' ? 'UPI/CREDIT' : mode + '/CREDIT'} ${customerNames[Math.floor(rng() * customerNames.length)]}`;
-      } else if (r < 0.62) {
-        // vendor payment
-        amount = -inr((15000 + rng() * 700000) * 100) / 100;
-        mode = rng() < 0.4 ? 'NEFT' : rng() < 0.7 ? 'IMPS' : rng() < 0.9 ? 'UPI' : 'RTGS';
-        desc = `${mode}/OUTWARD ${vendorNames[Math.floor(rng() * vendorNames.length)]}`;
-      } else if (r < 0.82) {
-        // operating expense
-        amount = -inr((1500 + rng() * 110000) * 100) / 100;
-        mode = rng() < 0.5 ? 'NEFT' : 'UPI';
-        desc = `${mode} ${expenseNotes[Math.floor(rng() * expenseNotes.length)]}`;
-      } else if (r < 0.9) {
-        // statutory
-        amount = -inr((20000 + rng() * 300000) * 100) / 100;
-        mode = 'NEFT';
-        desc = `NEFT GST-DEPOSIT / TDS-${rng() < 0.5 ? '194C' : '194J'}`;
-      } else if (r < 0.96) {
-        // salary
-        amount = -inr((450000 + rng() * 900000) * 100) / 100;
-        mode = 'RTGS';
-        desc = 'RTGS SALARY-CREDITS MONTHLY';
-      } else {
-        // misc / bank charges
-        amount = -inr((100 + rng() * 1200) * 100) / 100;
-        mode = 'NEFT';
-        desc = rng() < 0.5 ? 'BANK CHARGES' : 'NEFT CHARGES';
-      }
-      if (d > -3 && r > 0.97) {
-        status = 'uncleared'; // cheque in clearing
-        desc = 'CHQ IN CLEARING';
-        mode = 'CHQ';
-      }
-      balance = inr(balance + amount);
-      const refNo = shortRef(mode === 'UPI' ? 'UPI' : mode === 'CHQ' ? 'CHQ' : '', rng);
-      txns.push({
-        external_id: `BTX-${account.account_number.slice(-4)}-${Math.abs(hashCode(date + i + ''))}`,
-        txn_date: date,
-        value_date: date,
-        amount,
-        balance_after: balance,
-        description: desc,
-        mode,
-        ref_no: mode === 'CHQ' ? `CHQ NO ${shortRef('', rng)}` : refNo,
-        status,
-      });
-    }
-  }
-  // Inject platform payment debits (so reconciliation auto-matches) unless
-  // this is a recent-only refresh (those txns already exist).
-  if (!opts.recentOnly) {
-    const payments = await all(`SELECT * FROM payments WHERE company_id = ? AND status IN ('completed','processing')`, [companyId]);
-    for (const p of payments) {
-      if (p.bank_account_id !== account.id) continue;
-      const date = (p.processed_at || p.scheduled_date || todayStr()).slice(0, 10);
-      if (date < daysAgo(dayCount - 1)) continue;
-      const mode = p.mode === 'UPI' ? 'UPI' : p.mode;
-      txns.push({
-        external_id: `PAY-REF-${p.reference}`,
-        txn_date: date,
-        value_date: date,
-        amount: -p.net_amount,
-        balance_after: null,
-        description: `${mode}/OUTWARD ${p.reference}`,
-        mode,
-        ref_no: p.reference,
-        status: 'posted',
-      });
-    }
-    txns.sort((a, b) => a.txn_date.localeCompare(b.txn_date) || a.external_id.localeCompare(b.external_id));
-    let bal = startBalance;
-    for (const t of txns) {
-      if (t.balance_after == null) { bal = inr(bal + t.amount); t.balance_after = bal; }
-      else bal = t.balance_after;
-    }
-  }
-
-  if (!opts.recentOnly) {
-    // persist bank transactions + 30-day closing balance rollups
-    for (const t of txns) {
-      await insert('bank_transactions', {
-        id: uid('btx'), company_id: companyId, account_id: account.id,
-        external_id: t.external_id, txn_date: t.txn_date, value_date: t.value_date,
-        amount: t.amount, balance_after: t.balance_after, description: t.description,
-        mode: t.mode, ref_no: t.ref_no, status: t.status,
-        raw_json: JSON.stringify(t), created_at: nowIso(),
-      });
-    }
-    const dayBalances = new Map();
-    for (const t of txns) dayBalances.set(t.txn_date, t.balance_after);
-    const start = daysAgo(29);
-    let carry = dayBalances.has(start) ? dayBalances.get(start) : startBalance;
-    for (let k = 0; k < 30; k++) {
-      const date = addDays(start, k);
-      if (dayBalances.has(date)) carry = dayBalances.get(date);
-      await insert('cash_daily', {
-        id: uid('cd'), company_id: companyId, account_id: account.id,
-        date, closing_balance: carry, source: 'aa',
-      });
-    }
-    await update('bank_accounts', account.id, { last_synced_at: nowIso(), status: 'active' });
-  }
-  return txns;
-}
-
 // ----------------------------------------------------------------------------
 // PAYMENT GATEWAY (RazorpayX first, Cashfree fallback)
 // ----------------------------------------------------------------------------
+// Real execution requires RAZORPAYX_KEY_ID + RAZORPAYX_KEY_SECRET. For CI and
+// local testing, PAYMENT_GATEWAY=test enables a double that transitions the
+// payment to completed (and marks its invoices paid) WITHOUT generating any
+// fabricated gateway/UTR/bank data — it never invents transaction references
+// or amounts.
+const PAYMENT_GATEWAY_ENABLED = !!(process.env.RAZORPAYX_KEY_ID && process.env.RAZORPAYX_KEY_SECRET);
+const TEST_GATEWAY = process.env.PAYMENT_GATEWAY === 'test';
+
 const PaymentGateway = {
-  name: 'mock-razorpayx',
+  name: 'razorpayx',
 
   async createBatch(companyId, payments) {
-    // Real: RAZORPAYX Payout Batch API. Here: schedule jobs with async lifecycle.
+    if (!PAYMENT_GATEWAY_ENABLED && !TEST_GATEWAY) throw notConfigured('Payment gateway (RazorpayX)');
     for (const p of payments) {
       const delay = p.type === 'instant' ? 600 : (p.scheduled_date && p.scheduled_date > todayStr()) ? 8000 : 2500;
       await queue.enqueue(companyId, 'gateway.execute', { paymentId: p.id }, { delayMs: delay });
@@ -245,30 +137,23 @@ const PaymentGateway = {
     if (!p) throw new Error('payment not found');
     await update('payments', paymentId, { status: 'processing', processed_at: nowIso() });
 
-    const fail = hashCode(paymentId) % 25 === 0; // deterministic ~4% failure for demo
-    const latency = p.mode === 'UPI' || p.mode === 'IMPS' ? 1200 : p.mode === 'RTGS' ? 2200 : 1800;
-    return new Promise((resolve) => {
-      setTimeout(async () => {
-        if (fail) {
-          await update('payments', paymentId, { status: 'failed', failure_reason: 'Bank declined: insufficient funds in debit account' });
-          await queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'failed' });
-          resolve({ status: 'failed' });
-        } else {
-          const utr = 'UTR' + String(Math.floor(Math.random() * 90000000000) + 10000000000);
-          await update('payments', paymentId, {
-            status: 'completed', gateway_txn_id: utr, processed_at: nowIso(),
-            reference: p.reference || utr,
-          });
-          let ids = [];
-          try { ids = JSON.parse(p.invoice_ids || '[]'); } catch { ids = String(p.invoice_ids || '').split(',').map(s => s.trim()).filter(Boolean); }
-          if (ids.length) {
-            await run(`UPDATE invoices SET status='paid', paid_at=? WHERE id IN (${ids.map(() => '?').join(',')})`, [nowIso(), ...ids]);
-          }
-          await queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'completed' });
-          resolve({ status: 'completed', utr });
-        }
-      }, latency);
-    });
+    if (TEST_GATEWAY) {
+      // CI double: complete the payment and mark invoices paid. No UTR, no
+      // reference changes, no fabricated bank transaction.
+      await update('payments', paymentId, { status: 'completed', processed_at: nowIso() });
+      let ids = [];
+      try { ids = JSON.parse(p.invoice_ids || '[]'); } catch { ids = String(p.invoice_ids || '').split(',').map((s) => s.trim()).filter(Boolean); }
+      if (ids.length) {
+        await run(`UPDATE invoices SET status='paid', paid_at=? WHERE id IN (${ids.map(() => '?').join(',')})`, [nowIso(), ...ids]);
+      }
+      await queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'completed' });
+      return { status: 'completed' };
+    }
+
+    if (!PAYMENT_GATEWAY_ENABLED) throw notConfigured('Payment gateway (RazorpayX)');
+    // TODO(real-gateway): call the RazorpayX Payout Batch API and persist the
+    // real transaction id / UTR returned by the provider.
+    throw notConfigured('Payment gateway (RazorpayX)');
   },
 };
 
@@ -354,7 +239,7 @@ queue.on('tally.syncPayment', async (job, payload) => { await TallyConnector.syn
 // OCR ENGINE (trained on Indian GST invoice formats)
 // ----------------------------------------------------------------------------
 const OcrEngine = {
-  name: 'mock-ocr-indian-gst-v1',
+  name: 'ocr-indian-gst-v1',
 
   // Returns structured fields from invoice text. Tolerant of Indian layouts
   // (GSTIN, HSN, CGST/SGST/IGST, TDS) and bilingual narration.
@@ -397,75 +282,6 @@ const OcrEngine = {
       engine: this.name,
     };
   },
-
-  // Sample invoice email used by the demo (realistic Indian B2B invoice).
-  // template: 'cement' | 'apex' | 'freight'
-  sampleEmail(template = 'cement') {
-    const tpl = {
-      cement: {
-        from: 'billing@shreecementtraders.in',
-        supplier: 'Shree Cement Traders',
-        gstin: '29AABCS2345K1Z2',
-        po: 'PO-2026-118',
-        taxable: '18,50,000.00', cgst: '1,58,760.00', sgst: '1,66,500.00',
-        tds: '46,250.00', grand: '21,19,010.00',
-        line1: 'HSN 2523 | Portland Cement 43 Grade | 4500 bags | 392.00 | 1764000.00 | CGST 9% 158760.00',
-        line2: 'HSN 2523 | Cement transport & handling | 1 | 86000.00 | 86000.00 | SGST 9% 7740.00',
-        bank: 'A/C 50210045678912, IFSC HDFC0001234',
-      },
-      apex: {
-        from: 'billing@apexsteel.in',
-        supplier: 'Apex Steel Works',
-        gstin: '29AAJPA5678K1Z7',
-        po: 'PO-2026-142',
-        taxable: '5,40,000.00', cgst: '48,600.00', sgst: '48,600.00',
-        tds: '13,500.00', grand: '6,37,200.00',
-        line1: 'HSN 7214 | TMT Bars Fe 500D 12mm | 12000 kg | 41.00 | 492000.00 | CGST 9% 44280.00',
-        line2: 'HSN 7214 | TMT Bars Fe 500D 16mm | 1000 kg | 48.00 | 48000.00 | SGST 9% 4320.00',
-        bank: 'A/C 918010099887, IFSC UTIB0000045',
-      },
-      freight: {
-        from: 'ops@globalfreight.in',
-        supplier: 'Global Freight LLP',
-        gstin: '29AABFG8765P1Z1',
-        po: 'PO-2026-139',
-        taxable: '2,30,000.00', cgst: '20,700.00', sgst: '20,700.00',
-        tds: '5,750.00', grand: '2,71,400.00',
-        line1: 'HSN 9965 | Surface transport of goods - Bangalore to Chennai | 12 trips | 19166.67 | 230000.00 | CGST 9% 20700.00',
-        line2: 'HSN 9965 | Fuel adjustment surcharge | 1 | 0.00 | 0.00 | SGST 9% 0.00',
-        bank: 'A/C 089301122334, IFSC YESB0000046',
-      },
-    }[template] || null;
-    if (!tpl) return null;
-    const invNo = 'INV-2026-' + (100 + Math.floor(Math.random() * 800));
-    const dt = todayStr().split('-').reverse().join('/');
-    const due = addDays(todayStr(), 30).split('-').reverse().join('/');
-    return {
-      from: tpl.from,
-      subject: `Invoice ${invNo} from ${tpl.supplier} - GST INV`,
-      body: `Dear Team,
-
-Please find attached tax invoice ${invNo} supplied against ${tpl.po}.
-
-Supplier: ${tpl.supplier}
-GSTIN: ${tpl.gstin}
-Invoice Date: ${dt}   Due Date: ${due}
-
-${tpl.line1}
-${tpl.line2}
-
-Taxable Amount: ${tpl.taxable}
-CGST: ${tpl.cgst}
-SGST: ${tpl.sgst}
-IGST: 0.00
-TDS (194C): ${tpl.tds}
-Grand Total: ${tpl.grand}
-
-Kindly process for payment on due date. Payment via NEFT to ${tpl.bank}.
-Regards,
-Billing Desk, ${tpl.supplier}`,
-    };
-  },
 };
 
 function normalizeDate(s) {
@@ -487,11 +303,9 @@ const GstDataProvider = {
   async fetchGstr2b(companyId, period) {
     const company = await get('SELECT * FROM companies WHERE id = ?', [companyId]);
     const gstin = company.gstin;
-    // Delegate to the GSP/GSTN adapter (server/src/gstn.js). In mock mode it
-    // builds a realistic GSP-shaped GSTR-2B payload from platform invoices
-    // (first invoice not yet reflected, second at 88% value) so the mismatch
-    // scan always finds real flags; in live mode it fetches GSTR-2B through
-    // the configured GSP and maps the response to the same row shape.
+    // Delegate to the GSP/GSTN adapter (server/src/gstn.js), which fetches
+    // GSTR-2B through the configured GSP and maps the response to our row
+    // shape. No simulated payloads are generated.
     const raw = await Gstn.fetchGstr2bRaw(companyId, period, gstin);
     const mapped = Gstn.mapGstr2b(raw, { period, gstin });
     const snapshot = {

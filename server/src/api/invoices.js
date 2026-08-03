@@ -6,7 +6,7 @@
 const { all, get, insert, run, update } = require('../db');
 const { uid, nowIso, todayStr, addDays, inr } = require('../util');
 const { ApiError, audit } = require('../auth');
-const { queue, OcrEngine, EmailInbox, createApprovalChain } = require('../adapters');
+const { queue, OcrEngine, createApprovalChain } = require('../adapters');
 const Aging = require('../services/aging');
 const Invoices = require('../services/invoices');
 const { bodyOf } = require('./validators');
@@ -44,22 +44,9 @@ function register(r, deps) {
   });
 
   r.post('/api/invoices/ocr-preview', async (req, res, p, user) => {
-    const text = (req.body || {}).text || OcrEngine.sampleEmail('cement').body;
+    const text = String((req.body || {}).text || '').trim();
+    if (!text) throw new ApiError(400, 'text required');
     ok(res, OcrEngine.extract(text));
-  });
-
-  r.post('/api/invoices/email-sim', async (req, res, p, user) => {
-    const template = (req.body || {}).template || 'cement';
-    const mail = OcrEngine.sampleEmail(template);
-    const invoice = await EmailInbox.forward(companyOf(user), mail.from, mail.subject, mail.body);
-    const poMatch = mail.body.match(/PO-\d+/);
-    if (poMatch) {
-      await update('invoices', invoice.id, { purchase_order_no: poMatch[0] });
-      invoice.purchase_order_no = poMatch[0];
-    }
-    const twm = await Invoices.threeWayMatch(companyOf(user), invoice.id);
-    await audit(companyOf(user), user, 'invoice.captured', 'invoice', invoice.id, { source: 'email_sim', invoice_no: invoice.invoice_no });
-    ok(res, { invoice: await get('SELECT * FROM invoices WHERE id = ?', [invoice.id]), ocr: JSON.parse(invoice.ocr_json), three_way_match: twm });
   });
 
   r.post('/api/invoices/capture', async (req, res, p, user) => {
@@ -68,9 +55,13 @@ function register(r, deps) {
     const source = b.source || 'manual';
     let fields;
     if (source === 'pdf') {
-      const mail = OcrEngine.sampleEmail('apex');
-      fields = OcrEngine.extract(mail.body);
+      // PDF uploads must carry the OCR'd invoice text; the OCR parser runs on
+      // that real text (no canned samples).
+      const text = String(b.text || '').trim();
+      if (!text) throw new ApiError(400, 'text required for pdf capture');
+      fields = OcrEngine.extract(text);
       fields.source = 'pdf_upload';
+      if (fields.gstin && !fields.gstin_vendor) fields.gstin_vendor = fields.gstin;
     } else {
       fields = b;
       fields.source = 'manual';

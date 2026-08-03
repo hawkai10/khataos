@@ -18,7 +18,9 @@ const { all, insert, update } = require('./db');
 const { uid, nowIso } = require('./util');
 const Tally = require('./tally');
 
-const GSTIN_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][0-9A-Z]{3}$/;
+// GSTIN = 15 chars: 2-digit state code, 10-char PAN (5 letters, 4 digits,
+// 1 letter), entity code, 'Z', check character.
+const GSTIN_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 
 // Standard Tally groups used when a voucher-only export references ledgers
 // that were not uploaded as masters. KhataOS auto-creates those ledgers under
