@@ -9,7 +9,12 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "smoke": "node tests/smoke.js",
+    "smoke": "node ../tests/smoke.js",
+    "smoke:pg": "node ../tests/smoke.js --pg",
     "reset": "node -e \"require('fs').rmSync('data/khataos.db',{force:true});console.log('db reset')\""
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.2.0",
+    "pg": "^8.13.0"
   }
 }

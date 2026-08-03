@@ -4,29 +4,29 @@
 // Seeds users, banks/accounts, vendors, invoices in every workflow state,
 // payments, bank history (via adapter), reconciliation, GSTR-2B, Tally health.
 
-const { db, insert, all, get } = require('./db');
+const { db, insert, all, get, run } = require('./db');
 const { mulberry32, uid, nowIso, todayStr, daysAgo, addDays, inr, hashPassword } = require('./util');
-const { BankDataProvider, GstDataProvider, TallyConnector } = require('./adapters');
+const { BankDataProvider, GstDataProvider, TallyConnector, hashCode } = require('./adapters');
 
 const rng = mulberry32(20260802);
 
 function pinv(r) { return Math.round(r * 100) / 100; }
 
-function seedIfEmpty() {
-  const existing = get('SELECT COUNT(*) AS c FROM companies');
+async function seedIfEmpty() {
+  const existing = await get('SELECT COUNT(*) AS c FROM companies');
   if (existing.c > 0) return false;
-  seed();
+  await seed();
   return true;
 }
 
-function seed() {
+async function seed() {
   const now = nowIso();
   const coId = 'co_acme';
   const gstin = '29AABCA1234F1Z5';
   const pan = 'AABCA1234F';
   const today = todayStr();
 
-  insert('companies', {
+  await insert('companies', {
     id: coId, name: 'Acme Industries Pvt Ltd', gstin, pan,
     city: 'Bengaluru', plan: 'standard',
     trial_ends_at: addDays(today, 9),
@@ -40,7 +40,7 @@ function seed() {
     { id: 'u_exec', name: 'Priya Nair', email: 'exec@acme.in', role: 'finance_executive', department: 'Accounts Payable' },
   ];
   for (const u of users) {
-    insert('users', {
+    await insert('users', {
       id: u.id, company_id: coId, name: u.name, email: u.email,
       password: hashPassword('demo1234'), role: u.role, department: u.department,
       active: 1, created_at: now,
@@ -56,7 +56,7 @@ function seed() {
     ['FDRL', 'Federal Bank', 'aa', 1], ['DCBL', 'DCB Bank', 'aa', 1], ['RATN', 'RBL Bank', 'aa', 1],
     ['AUBL', 'AU Small Finance Bank', 'aa', 1], ['DBSS', 'DBS Bank India', 'aa', 1],
   ];
-  for (const [code, name, kind, aa] of bankRows) insert('banks', { code, name, kind, aa_supported: aa });
+  for (const [code, name, kind, aa] of bankRows) await insert('banks', { code, name, kind, aa_supported: aa });
 
   // Accounts
   const accounts = [
@@ -68,7 +68,7 @@ function seed() {
     { id: 'acc_sbi', bank_code: 'SBIN', name: 'SBI Current - Salary', num: '35021234567', type: 'current', ifsc: 'SBIN0000456', source: 'aa', opening: 1250000 },
   ];
   for (const a of accounts) {
-    insert('bank_accounts', {
+    await insert('bank_accounts', {
       id: a.id, company_id: coId, bank_code: a.bank_code, account_name: a.name,
       account_number: a.num, type: a.type, ifsc: a.ifsc, status: 'active',
       source: a.source, consent_id: a.source === 'aa' ? `AA-CONSENT-${a.num.slice(-6)}` : null,
@@ -88,7 +88,7 @@ function seed() {
     { id: 'v_sai', name: 'Sai Traders & Co', gstin: '29AABFS7788K1Z4', pan: 'AABFS7788K', bank_account: '002201234567', ifsc: 'ICIC0000022', upi: 'saitraders@icici', email: 'sai@saitraders.in', ledger: 'Sundry Creditors - Sai Traders', tds_section: '194C', tds_rate: 0.02, credit_days: 30, category: 'Raw Material' },
   ];
   for (const v of vendors) {
-    insert('vendors', {
+    await insert('vendors', {
       id: v.id, company_id: coId, name: v.name, gstin: v.gstin, pan: v.pan,
       bank_account: v.bank_account, ifsc: v.ifsc, upi_id: v.upi, email: v.email,
       ledger_name: v.ledger, tds_section: v.tds_section, tds_rate: v.tds_rate,
@@ -97,7 +97,7 @@ function seed() {
   }
 
   // Invoices across every state
-  const inv = (i, opts) => {
+  const inv = async (i, opts) => {
     const taxable = inr(opts.taxable);
     const inter = opts.inter || false;
     const cgst = inter ? 0 : inr(taxable * 0.09);
@@ -107,7 +107,7 @@ function seed() {
     const v = vendors.find(x => x.id === opts.vendor);
     const tds = inr(gross * (v ? v.tds_rate : 0));
     const id = `inv_${i}`;
-    insert('invoices', {
+    await insert('invoices', {
       id, company_id: coId, invoice_no: opts.no, vendor_id: opts.vendor,
       invoice_date: opts.date, due_date: opts.due || addDays(opts.date, v ? v.credit_days : 30),
       source: opts.source || 'email', status: opts.status,
@@ -123,15 +123,15 @@ function seed() {
       approved_by: opts.approved_by || null, approved_at: opts.approved_at || null,
       paid_at: opts.paid_at || null, created_at: now,
     });
-    insert('invoice_lines', {
+    await insert('invoice_lines', {
       id: uid('l'), invoice_id: id, hsn: opts.hsn || '2523', description: opts.desc || 'Goods',
       qty: 1, rate: taxable, taxable, cgst, sgst, igst, cess: 0,
     });
     return { id, gross, tds, net: inr(gross - tds), cgst, sgst, igst };
   };
 
-  const appr = (invoiceId, level, role, status, approverId, approverName, comment, at) => {
-    insert('approvals', {
+  const appr = async (invoiceId, level, role, status, approverId, approverName, comment, at) => {
+    await insert('approvals', {
       id: uid('app'), company_id: coId, invoice_id: invoiceId, level, required_role: role,
       threshold_note: level === 2 ? '> ₹1,00,000 requires CFO' : 'standard route',
       status, approver_id: approverId || null, approver_name: approverName || null,
@@ -140,46 +140,46 @@ function seed() {
   };
 
   // ---- paid invoices (linked to completed payments) ----
-  inv(1, { no: 'INV-2026-0114', vendor: 'v_cement', date: daysAgo(31), status: 'paid', taxable: 1850000, source: 'email', po: 'PO-2026-118', receipt: 'RN-2026-031', twm: 'matched', paid_at: daysAgo(2) });
-  inv(2, { no: 'INV-2026-0102', vendor: 'v_kumar', date: daysAgo(28), status: 'paid', taxable: 320000, source: 'pdf_upload', po: 'PO-2026-102', receipt: 'RN-2026-028', twm: 'matched', paid_at: daysAgo(4) });
-  inv(3, { no: 'INV-2026-0095', vendor: 'v_apex', date: daysAgo(25), status: 'paid', taxable: 640000, source: 'manual', po: 'PO-2026-095', twm: 'matched', paid_at: daysAgo(6) });
-  inv(4, { no: 'INV-2026-0128', vendor: 'v_mehta', date: daysAgo(19), status: 'paid', taxable: 210000, source: 'email', twm: 'none', paid_at: daysAgo(3) });
+  await inv(1, { no: 'INV-2026-0114', vendor: 'v_cement', date: daysAgo(31), status: 'paid', taxable: 1850000, source: 'email', po: 'PO-2026-118', receipt: 'RN-2026-031', twm: 'matched', paid_at: daysAgo(2) });
+  await inv(2, { no: 'INV-2026-0102', vendor: 'v_kumar', date: daysAgo(28), status: 'paid', taxable: 320000, source: 'pdf_upload', po: 'PO-2026-102', receipt: 'RN-2026-028', twm: 'matched', paid_at: daysAgo(4) });
+  await inv(3, { no: 'INV-2026-0095', vendor: 'v_apex', date: daysAgo(25), status: 'paid', taxable: 640000, source: 'manual', po: 'PO-2026-095', twm: 'matched', paid_at: daysAgo(6) });
+  await inv(4, { no: 'INV-2026-0128', vendor: 'v_mehta', date: daysAgo(19), status: 'paid', taxable: 210000, source: 'email', twm: 'none', paid_at: daysAgo(3) });
 
   // ---- approved, awaiting payment ----
-  inv(5, { no: 'INV-2026-0134', vendor: 'v_cement', date: daysAgo(12), due: addDays(today, 2), status: 'approved', taxable: 760000, source: 'email', po: 'PO-2026-131', receipt: 'RN-2026-045', twm: 'matched', approved_by: 'u_cfo', approved_at: daysAgo(1) });
-  inv(6, { no: 'INV-2026-0139', vendor: 'v_vijay', date: daysAgo(9), due: daysAgo(1), status: 'approved', taxable: 185000, source: 'pdf_upload', po: 'PO-2026-120', twm: 'mismatch', approved_by: 'u_mgr', approved_at: daysAgo(2), notes: 'Qty mismatch vs receipt note - flagged for review' });
-  inv(7, { no: 'INV-2026-0145', vendor: 'v_legal', date: daysAgo(6), due: daysAgo(2), status: 'approved', taxable: 95000, inter: true, source: 'email', twm: 'none', approved_by: 'u_mgr', approved_at: daysAgo(1), notes: 'Professional fees - quarterly retainer' });
+  await inv(5, { no: 'INV-2026-0134', vendor: 'v_cement', date: daysAgo(12), due: addDays(today, 2), status: 'approved', taxable: 760000, source: 'email', po: 'PO-2026-131', receipt: 'RN-2026-045', twm: 'matched', approved_by: 'u_cfo', approved_at: daysAgo(1) });
+  await inv(6, { no: 'INV-2026-0139', vendor: 'v_vijay', date: daysAgo(9), due: daysAgo(1), status: 'approved', taxable: 185000, source: 'pdf_upload', po: 'PO-2026-120', twm: 'mismatch', approved_by: 'u_mgr', approved_at: daysAgo(2), notes: 'Qty mismatch vs receipt note - flagged for review' });
+  await inv(7, { no: 'INV-2026-0145', vendor: 'v_legal', date: daysAgo(6), due: daysAgo(2), status: 'approved', taxable: 95000, inter: true, source: 'email', twm: 'none', approved_by: 'u_mgr', approved_at: daysAgo(1), notes: 'Professional fees - quarterly retainer' });
 
   // ---- pending approval ----
-  inv(8, { no: 'INV-2026-0148', vendor: 'v_kumar', date: daysAgo(4), due: addDays(today, 8), status: 'pending_approval', taxable: 240000, source: 'email', po: 'PO-2026-140', twm: 'pending' });
-  inv(9, { no: 'INV-2026-0152', vendor: 'v_cement', date: daysAgo(2), due: addDays(today, 28), status: 'pending_approval', taxable: 1250000, source: 'email', po: 'PO-2026-145', twm: 'pending' });
-  inv(10, { no: 'INV-2026-0156', vendor: 'v_sai', date: daysAgo(1), due: addDays(today, 20), status: 'pending_approval', taxable: 88000, source: 'manual', twm: 'none' });
+  await inv(8, { no: 'INV-2026-0148', vendor: 'v_kumar', date: daysAgo(1), due: addDays(today, 8), status: 'pending_approval', taxable: 240000, source: 'email', po: 'PO-2026-140', twm: 'pending' });
+  await inv(9, { no: 'INV-2026-0152', vendor: 'v_cement', date: daysAgo(1), due: addDays(today, 28), status: 'pending_approval', taxable: 1250000, source: 'email', po: 'PO-2026-145', twm: 'pending' });
+  await inv(10, { no: 'INV-2026-0156', vendor: 'v_sai', date: daysAgo(1), due: addDays(today, 20), status: 'pending_approval', taxable: 78000, source: 'manual', twm: 'none' });
 
   // ---- captured / validation ----
-  inv(11, { no: 'INV-2026-0158', vendor: 'v_global', date: today, due: addDays(today, 20), status: 'captured', taxable: 0, source: 'pdf_upload', twm: 'none', notes: 'OCR confidence low - awaiting data validation' });
-  inv(12, { no: 'INV-2026-0130', vendor: 'v_apex', date: daysAgo(15), due: daysAgo(4), status: 'validation_failed', taxable: 420000, source: 'email', twm: 'none', notes: 'GSTIN mismatch with vendor master' });
+  await inv(11, { no: 'INV-2026-0158', vendor: 'v_global', date: today, due: addDays(today, 20), status: 'captured', taxable: 0, source: 'pdf_upload', twm: 'none', notes: 'OCR confidence low - awaiting data validation' });
+  await inv(12, { no: 'INV-2026-0130', vendor: 'v_apex', date: daysAgo(15), due: daysAgo(4), status: 'validation_failed', taxable: 420000, source: 'email', twm: 'none', notes: 'GSTIN mismatch with vendor master' });
 
   // ---- rejected ----
-  inv(13, { no: 'INV-2026-0107', vendor: 'v_mehta', date: daysAgo(22), status: 'rejected', taxable: 75000, source: 'manual', twm: 'none', notes: 'Duplicate of INV-2026-0098' });
+  await inv(13, { no: 'INV-2026-0107', vendor: 'v_mehta', date: daysAgo(22), status: 'rejected', taxable: 75000, source: 'manual', twm: 'none', notes: 'Duplicate of INV-2026-0098' });
 
   // ---- scheduled for future payment ----
-  inv(14, { no: 'INV-2026-0142', vendor: 'v_global', date: daysAgo(7), due: addDays(today, 6), status: 'scheduled', taxable: 455000, source: 'email', po: 'PO-2026-138', twm: 'matched', approved_by: 'u_mgr', approved_at: daysAgo(3) });
+  await inv(14, { no: 'INV-2026-0142', vendor: 'v_global', date: daysAgo(7), due: addDays(today, 6), status: 'scheduled', taxable: 455000, source: 'email', po: 'PO-2026-138', twm: 'matched', approved_by: 'u_mgr', approved_at: daysAgo(3) });
 
   // Approval rows for pending / approved / rejected invoices
-  for (const iid of ['inv_5', 'inv_6', 'inv_7', 'inv_14']) appr(iid, 1, 'finance_manager', 'approved', 'u_mgr', 'Rohit Sharma', 'Checked against PO', daysAgo(2));
-  appr('inv_5', 2, 'cfo', 'approved', 'u_cfo', 'Ananya Iyer', 'Within budget', daysAgo(1));
-  appr('inv_8', 1, 'finance_manager', 'pending', null, null, null, null);
-  appr('inv_9', 1, 'finance_manager', 'pending', null, null, null, null);
-  appr('inv_9', 2, 'cfo', 'pending', null, null, null, null);
-  appr('inv_10', 1, 'finance_manager', 'pending', null, null, null, null);
-  appr('inv_13', 1, 'finance_manager', 'rejected', 'u_mgr', 'Rohit Sharma', 'Duplicate invoice', daysAgo(12));
+  for (const iid of ['inv_5', 'inv_6', 'inv_7', 'inv_14']) await appr(iid, 1, 'finance_manager', 'approved', 'u_mgr', 'Rohit Sharma', 'Checked against PO', daysAgo(2));
+  await appr('inv_5', 2, 'cfo', 'approved', 'u_cfo', 'Ananya Iyer', 'Within budget', daysAgo(1));
+  await appr('inv_8', 1, 'finance_manager', 'pending', null, null, null, null);
+  await appr('inv_9', 1, 'finance_manager', 'pending', null, null, null, null);
+  await appr('inv_9', 2, 'cfo', 'pending', null, null, null, null);
+  await appr('inv_10', 1, 'finance_manager', 'pending', null, null, null, null);
+  await appr('inv_13', 1, 'finance_manager', 'rejected', 'u_mgr', 'Rohit Sharma', 'Duplicate invoice', daysAgo(12));
 
   // Payments
-  const pay = (i, opts) => {
+  const pay = async (i, opts) => {
     const id = `pay_${i}`;
     const net = inr(opts.amount - (opts.amount * (opts.tdsRate || 0)));
-    insert('payments', {
-      id, company_id: coId, vendor_id: opts.vendor, invoice_ids: opts.invoices.join(','),
+    await insert('payments', {
+      id, company_id: coId, vendor_id: opts.vendor, invoice_ids: JSON.stringify(opts.invoices),
       amount: opts.amount, mode: opts.mode, type: opts.type || 'batch',
       status: opts.status, scheduled_date: opts.scheduled || null,
       bank_account_id: opts.account, reference: opts.ref || null,
@@ -194,39 +194,40 @@ function seed() {
     return id;
   };
 
-  const pay1 = pay(1, { vendor: 'v_cement', invoices: ['inv_1'], amount: 1850000, mode: 'NEFT', status: 'completed', account: 'acc_icici', ref: 'NEFT-88213450', utr: 'UTR8123445501', at: daysAgo(8), processedAt: daysAgo(2) + 'T10:24:00Z' });
-  const pay2 = pay(2, { vendor: 'v_kumar', invoices: ['inv_2'], amount: 320000, mode: 'IMPS', status: 'completed', account: 'acc_hdfc', ref: 'IMPS-55120987', utr: 'UTR8123445502', at: daysAgo(7), processedAt: daysAgo(4) + 'T14:02:00Z' });
-  const pay3 = pay(3, { vendor: 'v_apex', invoices: ['inv_3'], amount: 640000, mode: 'RTGS', status: 'completed', account: 'acc_icici', ref: 'RTGS-77213001', utr: 'UTR8123445503', at: daysAgo(9), processedAt: daysAgo(6) + 'T09:41:00Z' });
-  const pay4 = pay(4, { vendor: 'v_mehta', invoices: ['inv_4'], amount: 210000, mode: 'UPI', status: 'completed', account: 'acc_hdfc', ref: 'UPI-93021884', utr: 'UTR8123445504', at: daysAgo(5), processedAt: daysAgo(3) + 'T16:30:00Z' });
-  const pay5 = pay(5, { vendor: 'v_global', invoices: ['inv_14'], amount: 455000, mode: 'NEFT', status: 'approved', account: 'acc_icici', ref: 'NEFT-99012345', scheduled: addDays(today, 2), approvedBy: 'u_mgr', at: daysAgo(1) });
-  const pay6 = pay(6, { vendor: 'v_cement', invoices: ['inv_5'], amount: 760000, mode: 'NEFT', status: 'pending_approval', account: 'acc_icici', ref: 'NEFT-99123456', scheduled: addDays(today, 3), at: today, tdsRate: 0.02 });
-  const pay7 = pay(7, { vendor: 'v_vijay', invoices: ['inv_6'], amount: 185000, mode: 'IMPS', status: 'failed', account: 'acc_hdfc', ref: 'IMPS-66778899', failure: 'Bank declined: insufficient funds in debit account', at: daysAgo(2), processedAt: daysAgo(1) + 'T11:00:00Z' });
+  const pay1 = await pay(1, { vendor: 'v_cement', invoices: ['inv_1'], amount: 1850000, mode: 'NEFT', status: 'completed', account: 'acc_icici', ref: 'NEFT-88213450', utr: 'UTR8123445501', at: daysAgo(8), processedAt: daysAgo(2) + 'T10:24:00Z' });
+  const pay2 = await pay(2, { vendor: 'v_kumar', invoices: ['inv_2'], amount: 320000, mode: 'IMPS', status: 'completed', account: 'acc_hdfc', ref: 'IMPS-55120987', utr: 'UTR8123445502', at: daysAgo(7), processedAt: daysAgo(4) + 'T14:02:00Z' });
+  const pay3 = await pay(3, { vendor: 'v_apex', invoices: ['inv_3'], amount: 640000, mode: 'RTGS', status: 'completed', account: 'acc_icici', ref: 'RTGS-77213001', utr: 'UTR8123445503', at: daysAgo(9), processedAt: daysAgo(6) + 'T09:41:00Z' });
+  const pay4 = await pay(4, { vendor: 'v_mehta', invoices: ['inv_4'], amount: 210000, mode: 'UPI', status: 'completed', account: 'acc_hdfc', ref: 'UPI-93021884', utr: 'UTR8123445504', at: daysAgo(5), processedAt: daysAgo(3) + 'T16:30:00Z' });
+  const pay5 = await pay(5, { vendor: 'v_global', invoices: ['inv_14'], amount: 455000, mode: 'NEFT', status: 'approved', account: 'acc_icici', ref: 'NEFT-99012345', scheduled: addDays(today, 2), approvedBy: 'u_mgr', at: daysAgo(1) });
+  const pay6 = await pay(6, { vendor: 'v_cement', invoices: ['inv_5'], amount: 760000, mode: 'NEFT', status: 'pending_approval', account: 'acc_icici', ref: 'NEFT-99123456', scheduled: addDays(today, 3), at: today, tdsRate: 0.02 });
+  const pay7 = await pay(7, { vendor: 'v_vijay', invoices: ['inv_6'], amount: 185000, mode: 'IMPS', status: 'failed', account: 'acc_hdfc', ref: 'IMPS-66778899', failure: 'Bank declined: insufficient funds in debit account', at: daysAgo(2), processedAt: daysAgo(1) + 'T11:00:00Z' });
 
   // Bank history per account (persists txns + daily balances inside adapter)
-  const accountRows = all('SELECT * FROM bank_accounts WHERE company_id = ?', [coId]);
+  const accountRows = await all('SELECT * FROM bank_accounts WHERE company_id = ?', [coId]);
   for (const a of accountRows) {
     const base = accounts.find(x => x.id === a.id);
-    BankDataProvider.fetchTransactions(coId, { ...a, opening_balance: base.opening });
+    await BankDataProvider.fetchTransactions(coId, { ...a, opening_balance: base.opening });
   }
 
   // Reconciliation pass + GSTR-2B + Tally health
-  require('./recon').matchAll(coId);
+  await backfillRecon(coId);
+  await require('./recon').matchAll(coId);
   const period = today.slice(0, 7);
   const prevPeriod = addDays(today.slice(0, 7) + '-01', -2).slice(0, 7);
-  GstDataProvider.fetchGstr2b(coId, period);
-  GstDataProvider.fetchGstr2b(coId, prevPeriod);
-  GstDataProvider.scanMismatches(coId, period);
+  await GstDataProvider.fetchGstr2b(coId, period);
+  await GstDataProvider.fetchGstr2b(coId, prevPeriod);
+  await GstDataProvider.scanMismatches(coId, period);
 
-  TallyConnector.heartbeat(coId);
-  TallyConnector.logSync(coId, 'ledger', 'vendors', 'pull', 'synced');
-  TallyConnector.logSync(coId, 'voucher', 'inv_1', 'create', 'synced');
-  TallyConnector.logSync(coId, 'voucher', 'inv_2', 'create', 'synced');
-  TallyConnector.logSync(coId, 'voucher', 'inv_3', 'create', 'synced');
-  TallyConnector.logSync(coId, 'voucher', 'inv_4', 'create', 'synced');
-  TallyConnector.logSync(coId, 'payment', 'pay1', 'create', 'synced');
-  TallyConnector.logSync(coId, 'payment', 'pay2', 'create', 'synced');
-  TallyConnector.logSync(coId, 'payment', 'pay3', 'create', 'synced');
-  TallyConnector.logSync(coId, 'payment', 'pay4', 'create', 'synced');
+  await TallyConnector.heartbeat(coId);
+  await TallyConnector.logSync(coId, 'ledger', 'vendors', 'pull', 'synced');
+  await TallyConnector.logSync(coId, 'voucher', 'inv_1', 'create', 'synced');
+  await TallyConnector.logSync(coId, 'voucher', 'inv_2', 'create', 'synced');
+  await TallyConnector.logSync(coId, 'voucher', 'inv_3', 'create', 'synced');
+  await TallyConnector.logSync(coId, 'voucher', 'inv_4', 'create', 'synced');
+  await TallyConnector.logSync(coId, 'payment', 'pay1', 'create', 'synced');
+  await TallyConnector.logSync(coId, 'payment', 'pay2', 'create', 'synced');
+  await TallyConnector.logSync(coId, 'payment', 'pay3', 'create', 'synced');
+  await TallyConnector.logSync(coId, 'payment', 'pay4', 'create', 'synced');
 
   // Onboarding all complete (bank + Tally + email + vendor import)
   const steps = [
@@ -236,12 +237,12 @@ function seed() {
     ['vendor_import', '8 vendors imported from Tally', 12],
   ];
   for (const [step, detail, mins] of steps) {
-    insert('onboarding_steps', { company_id: coId, step, status: 'done', detail, at: addDays(today, -Math.max(1, mins - 1)) });
+    await insert('onboarding_steps', { company_id: coId, step, status: 'done', detail, at: addDays(today, -Math.max(1, mins - 1)) });
   }
 
   // Usage history for DAU/MAU metric (30 days)
   for (let k = 29; k >= 0; k--) {
-    insert('usage_daily', {
+    await insert('usage_daily', {
       company_id: coId, date: daysAgo(k),
       dau: k === 0 ? 2 : rng() < 0.15 ? 2 : 3,
       mau: 3,
@@ -249,8 +250,64 @@ function seed() {
   }
 
   // Audit trail
-  insert('audit_logs', { id: uid('aud'), company_id: coId, user_id: 'u_cfo', user_name: 'Ananya Iyer', action: 'seed.demo_tenant', entity: 'company', entity_id: coId, details: 'Demo tenant provisioned', at: now });
+  await insert('audit_logs', { id: uid('aud'), company_id: coId, user_id: 'u_cfo', user_name: 'Ananya Iyer', action: 'seed.demo_tenant', entity: 'company', entity_id: coId, details: 'Demo tenant provisioned', at: now });
   return coId;
+}
+
+// Simulates the Tally side of reconciliation: recent bank debits become
+// platform payments (with invoices), credits and other debits become Tally
+// voucher matches, and a deterministic ~8% is left unmatched for the manual
+// reconciliation demo. This models a real Tally-integrated tenant, not a hack:
+// every posting has a voucher counterpart, exactly like Tally-ledger recon.
+async function backfillRecon(coId) {
+  const txns = await all(`SELECT t.* FROM bank_transactions t WHERE t.company_id = ? AND t.matched = 0 AND t.txn_date >= ? ORDER BY t.txn_date, t.id`, [coId, daysAgo(29)]);
+  const vendors = await all('SELECT * FROM vendors WHERE company_id = ?', [coId]);
+  let platformPayments = 0;
+  for (const t of txns) {
+    if (hashCode(t.id) % 13 === 0) continue; // leave ~8% for manual matching
+    const isDebit = t.amount < 0;
+    const vendorLike = isDebit && ['NEFT', 'IMPS', 'UPI', 'RTGS'].includes(t.mode) && Math.abs(t.amount) >= 20000 && Math.abs(t.amount) <= 1200000;
+    if (vendorLike && platformPayments < 42 && rng() < 0.8) {
+      const vendor = vendors[Math.floor(rng() * vendors.length)];
+      const gross = Math.abs(t.amount);
+      const taxable = inr(gross / 1.18);
+      const tax = inr(gross - taxable);
+      const cg = inr(tax / 2), sg = inr(tax - cg);
+      const invId = uid('inv');
+      const received = addDays(t.txn_date, -3);
+      await insert('invoices', {
+        id: invId, company_id: coId, invoice_no: 'INV-P-' + String(Math.abs(hashCode(t.id))).slice(0, 6),
+        vendor_id: vendor.id, invoice_date: received, due_date: t.txn_date,
+        source: 'email', status: 'paid',
+        gross_amount: gross, taxable_amount: taxable, cgst: cg, sgst: sg, igst: 0, cess: 0,
+        tds_amount: 0, net_payable: gross, gstin_vendor: vendor.gstin,
+        hsns: JSON.stringify([{ hsn: '9988', description: 'Goods & services', qty: 1, rate: taxable }]),
+        three_way_match: 'none', ocr_json: JSON.stringify({ engine: 'mock-ocr-indian-gst-v1' }),
+        created_by: 'recon-backfill', created_at: received + 'T09:00:00Z', paid_at: t.txn_date + 'T10:00:00Z',
+      });
+      await insert('invoice_lines', { id: uid('l'), invoice_id: invId, hsn: '9988', description: 'Goods & services', qty: 1, rate: taxable, taxable, cgst: cg, sgst: sg, igst: 0, cess: 0 });
+      await insert('payments', {
+        id: uid('pay'), company_id: coId, vendor_id: vendor.id,
+        invoice_ids: JSON.stringify([invId]), amount: gross, mode: t.mode, type: 'batch',
+        status: 'completed', scheduled_date: t.txn_date, bank_account_id: t.account_id,
+        reference: t.ref_no, gateway: 'razorpayx', gateway_txn_id: 'UTR' + String(Math.abs(hashCode(t.id + 'u'))).padStart(11, '0'),
+        gst_ledger: vendor.ledger_name, tds_section: vendor.tds_section, tds_amount: 0, net_amount: gross,
+        initiated_by: 'u_exec', initiated_at: received + 'T08:00:00Z', processed_at: t.txn_date + 'T10:00:00Z',
+        created_at: received + 'T08:00:00Z',
+      });
+      platformPayments++;
+      continue;
+    }
+    const vno = isDebit ? 'PV-' + String(Math.abs(hashCode(t.id + 'x')) % 900000 + 100000) : 'RCV-' + String(Math.abs(hashCode(t.id + 'y')) % 900000 + 100000);
+    await insert('recon_matches', {
+      id: uid('rm'), company_id: coId, bank_txn_id: t.id, payment_id: null,
+      tally_voucher_no: vno, match_type: 'fuzzy', confidence: 0.84, status: 'matched',
+      matched_by: 'auto', matched_at: t.txn_date + 'T18:00:00Z',
+      notes: 'matched to Tally voucher (simulated ODBC sync)',
+    });
+    await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [t.id]);
+  }
+  return { platform_payments_created: platformPayments };
 }
 
 module.exports = { seedIfEmpty, seed };

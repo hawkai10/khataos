@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="KhataOS — the finance operating platform for Indian mid-market companies">
+  <title>KhataOS — Finance Operating Platform</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23163a8f'/%3E%3Ctext x='16' y='22' font-size='17' font-weight='800' text-anchor='middle' fill='%23fff' font-family='Arial'%3EK%3C/text%3E%3Ccircle cx='25' cy='7' r='3' fill='%23b98a2f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- ================= LOGIN ================= -->
+  <div id="login-view" class="hidden">
+    <div class="login-shell">
+      <div class="login-brand">
+        <div class="brand">
+          <span class="brand-mark">K</span>
+          <span class="brand-name">Khata<span class="accent">OS</span></span>
+        </div>
+        <div>
+          <h1>Every rupee of the business, <em>one operating surface.</em></h1>
+          <p class="lead">Cash across every bank, payables, vendor payments, reconciliation and GST — built native to the Indian financial ecosystem, not retrofitted for it.</p>
+          <div class="login-perks">
+            <div class="perk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Consolidated multi-bank cash in under 15 minutes</div>
+            <div class="perk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Invoice-to-payment with Indian approval workflows & TDS</div>
+            <div class="perk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>70%+ automatic bank reconciliation with Tally as truth</div>
+            <div class="perk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>GST ITC, liabilities and GSTR-2B mismatch flags in real time</div>
+          </div>
+        </div>
+        <div class="foot">
+          <span>Acme Industries Pvt Ltd · GSTIN 29AABCA1234F1Z5</span>
+          <span class="mono">RBI data-localized · AWS Mumbai</span>
+        </div>
+      </div>
+      <div class="login-panel">
+        <div class="login-card">
+          <div class="login-eyebrow">Welcome back</div>
+          <h2>Sign in to KhataOS</h2>
+          <p class="tagline">Your morning brief on cash, payments and compliance.</p>
+          <form id="login-form">
+            <label for="login-email">Work email</label>
+            <input type="email" id="login-email" value="cfo@acme.in" autocomplete="username" required>
+            <label for="login-password">Password</label>
+            <input type="password" id="login-password" value="demo1234" autocomplete="current-password" required>
+            <button type="submit" class="btn primary block">Sign in</button>
+          </form>
+          <div class="demo-users">
+            <button type="button" class="chip" data-email="cfo@acme.in">CFO / Admin</button>
+            <button type="button" class="chip" data-email="manager@acme.in">Finance Manager</button>
+            <button type="button" class="chip" data-email="exec@acme.in">Finance Executive</button>
+          </div>
+          <div class="login-foot">Demo tenant · 14-day trial · Standard plan</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= APP SHELL ================= -->
+  <div id="app" class="hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">K</span>
+        <span class="brand-name">Khata<span class="accent">OS</span></span>
+      </div>
+      <div class="sidebar-label">Workspace</div>
+      <nav id="nav"></nav>
+      <div class="sidebar-footer">
+        <div class="user-chip">
+          <div class="avatar" id="user-avatar">A</div>
+          <div>
+            <div class="user-name" id="user-name">—</div>
+            <div class="user-role" id="user-role">—</div>
+          </div>
+        </div>
+        <button class="btn ghost small" id="logout-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+          Sign out
+        </button>
+      </div>
+    </aside>
+    <main>
+      <div class="main-inner">
+        <header class="topbar">
+          <div>
+            <div class="breadcrumb"><span>KhataOS</span> · <span class="crumb-active" id="page-crumb">Dashboard</span></div>
+            <h1 id="page-title">Dashboard</h1>
+            <p class="page-sub" id="page-sub"></p>
+          </div>
+          <div class="topbar-actions" id="topbar-actions"></div>
+        </header>
+        <div id="view"></div>
+      </div>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+  <div id="assistant-root"></div>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/ui.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

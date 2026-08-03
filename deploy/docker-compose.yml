@@ -1,0 +1,52 @@
+version: "3.9"
+
+# Production-shaped local stack for KhataOS.
+# The API surface is identical to the zero-dependency dev build; this composes
+# the PostgreSQL transactional store and ClickHouse analytics layer that the
+# MVP targets in AWS Mumbai (ap-south-1).
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://khataos:khataos@postgres:5432/khataos
+      CLICKHOUSE_URL: http://clickhouse:8123
+      KHATAOS_ENV: production
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: khataos
+      POSTGRES_PASSWORD: khataos
+      POSTGRES_DB: khataos
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U khataos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  # Event queue in production: SQS (AWS) or Kafka. Local dev can use the
+  # in-process queue already present in the dev server.
+
+volumes:
+  pgdata:
+  chdata:

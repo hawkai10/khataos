@@ -9,9 +9,9 @@ const { seedIfEmpty } = require('./seed');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const WEB_ROOT = path.join(__dirname, '..', '..', 'web');
+const DOCS_ROOT = path.join(__dirname, '..', '..', 'docs');
 
 const router = createRouter();
-seedIfEmpty();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -45,8 +45,9 @@ function serveStatic(req, res, pathname) {
   let rel = decodeURIComponent(pathname);
   if (rel === '/') rel = '/index.html';
   if (rel.includes('..')) { res.writeHead(403); res.end('forbidden'); return; }
-  const file = path.join(WEB_ROOT, rel);
-  if (!file.startsWith(WEB_ROOT)) { res.writeHead(403); res.end('forbidden'); return; }
+  const root = rel.startsWith('/docs/') ? DOCS_ROOT : WEB_ROOT;
+  const file = path.join(root, rel.replace(/^\/docs\//, ''));
+  if (!file.startsWith(root)) { res.writeHead(403); res.end('forbidden'); return; }
   fs.readFile(file, (err, buf) => {
     if (err) {
       res.writeHead(404, { 'content-type': 'text/plain' });
@@ -66,7 +67,21 @@ const server = http.createServer(async (req, res) => {
       const route = router.find(req.method, url.pathname);
       if (!route) throw new ApiError(404, `No route for ${req.method} ${url.pathname}`);
       if (['POST', 'PUT', 'PATCH'].includes(req.method)) req.body = await readBody(req);
-      const user = require('./auth').currentUser(req);
+      const user = await require('./auth').currentUser(req);
+      // Only a small allowlist of routes works without a session (login,
+      // logout, integration status/config, provider webhooks). Everything
+      // else must 401 cleanly instead of crashing in companyOf(null).
+      const PUBLIC_API = new Set([
+        'POST /api/auth/login',
+        'POST /api/auth/logout',
+        'GET /api/integrations/decentro/status',
+        'POST /api/decentro/webhook',
+        'GET /api/gstn/config',
+        'GET /api/assistant/prompts',
+      ]);
+      if (!user && !PUBLIC_API.has(`${req.method} ${url.pathname}`)) {
+        throw new ApiError(401, 'Authentication required');
+      }
       const data = await route.handler(req, res, route.params, user);
       if (!res.headersSent) ok(res, data);
       return;
@@ -82,7 +97,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`KhataOS MVP running: http://localhost:${PORT}`);
-  console.log('Demo logins: cfo@acme.in / manager@acme.in / exec@acme.in (password: demo1234)');
-});
+(async () => {
+  await seedIfEmpty();
+  server.listen(PORT, () => {
+    console.log(`KhataOS MVP running: http://localhost:${PORT}`);
+    console.log('Demo logins: cfo@acme.in / manager@acme.in / exec@acme.in (password: demo1234)');
+  });
+})();

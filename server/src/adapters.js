@@ -9,6 +9,7 @@
 
 const { db, insert, update, run, all, get } = require('./db');
 const { mulberry32, uid, nowIso, todayStr, daysAgo, addDays, inr, shortRef } = require('./util');
+const Gstn = require('./gstn');
 
 function hashCode(str) {
   let h = 0;
@@ -25,9 +26,9 @@ class JobQueue {
     this.timers = new Map();
   }
   on(type, fn) { this.handlers.set(type, fn); }
-  enqueue(companyId, type, payload, opts = {}) {
+  async enqueue(companyId, type, payload, opts = {}) {
     const id = uid('job');
-    insert('jobs', {
+    await insert('jobs', {
       id, company_id: companyId, type,
       payload: JSON.stringify(payload || {}),
       status: 'queued', attempts: 0,
@@ -39,22 +40,22 @@ class JobQueue {
     return id;
   }
   async _run(id) {
-    const job = get('SELECT * FROM jobs WHERE id = ?', [id]);
+    const job = await get('SELECT * FROM jobs WHERE id = ?', [id]);
     if (!job || job.status === 'done') return;
     const handler = this.handlers.get(job.type);
-    if (!handler) { run("UPDATE jobs SET status='failed', last_error=? WHERE id=?", ['no handler', id]); return; }
-    run("UPDATE jobs SET status='running', attempts = attempts + 1 WHERE id=?", [id]);
+    if (!handler) { await run("UPDATE jobs SET status='failed', last_error=? WHERE id=?", ['no handler', id]); return; }
+    await run("UPDATE jobs SET status='running', attempts = attempts + 1 WHERE id=?", [id]);
     try {
       await handler(job, JSON.parse(job.payload));
-      run("UPDATE jobs SET status='done', finished_at=? WHERE id=?", [nowIso(), id]);
+      await run("UPDATE jobs SET status='done', finished_at=? WHERE id=?", [nowIso(), id]);
     } catch (err) {
       const attempts = job.attempts + 1;
       if (attempts < 3) {
-        run("UPDATE jobs SET status='queued', last_error=?, run_at=? WHERE id=?", [String(err.message || err), new Date(Date.now() + attempts * 2500).toISOString(), id]);
-        const t = setTimeout(() => this._run(id), attempts * 2500);
+        await run("UPDATE jobs SET status='queued', last_error=?, run_at=? WHERE id=?", [String(err.message || err), new Date(Date.now() + attempts * 2500).toISOString(), id]);
+        const t = setTimeout(() => { this._run(id); }, attempts * 2500);
         this.timers.set(id, t);
       } else {
-        run("UPDATE jobs SET status='failed', last_error=?, finished_at=? WHERE id=?", [String(err.message || err), nowIso(), id]);
+        await run("UPDATE jobs SET status='failed', last_error=?, finished_at=? WHERE id=?", [String(err.message || err), nowIso(), id]);
       }
     }
   }
@@ -86,19 +87,19 @@ const BankDataProvider = {
   },
 
   // Fetch bank transactions for an account (mock: generated deterministic history)
-  fetchTransactions(companyId, account, opts = {}) {
+  async fetchTransactions(companyId, account, opts = {}) {
     return generateAccountHistory(companyId, account, opts);
   },
 
-  refresh(companyId, account) {
-    const txns = generateAccountHistory(companyId, account, { recentOnly: true });
-    update('bank_accounts', account.id, { last_synced_at: nowIso(), status: 'active' });
+  async refresh(companyId, account) {
+    const txns = await generateAccountHistory(companyId, account, { recentOnly: true });
+    await update('bank_accounts', account.id, { last_synced_at: nowIso(), status: 'active' });
     return txns;
   },
 };
 
 // Deterministic 90-day transaction history for an account.
-function generateAccountHistory(companyId, account, opts = {}) {
+async function generateAccountHistory(companyId, account, opts = {}) {
   const rng = mulberry32(hashCode(account.account_number));
   const dayCount = opts.recentOnly ? 7 : 90;
   const startBalance = account.opening_balance != null ? account.opening_balance : 800000 + rng() * 3400000;
@@ -168,7 +169,7 @@ function generateAccountHistory(companyId, account, opts = {}) {
   // Inject platform payment debits (so reconciliation auto-matches) unless
   // this is a recent-only refresh (those txns already exist).
   if (!opts.recentOnly) {
-    const payments = all(`SELECT * FROM payments WHERE company_id = ? AND status IN ('completed','processing')`, [companyId]);
+    const payments = await all(`SELECT * FROM payments WHERE company_id = ? AND status IN ('completed','processing')`, [companyId]);
     for (const p of payments) {
       if (p.bank_account_id !== account.id) continue;
       const date = (p.processed_at || p.scheduled_date || todayStr()).slice(0, 10);
@@ -197,7 +198,7 @@ function generateAccountHistory(companyId, account, opts = {}) {
   if (!opts.recentOnly) {
     // persist bank transactions + 30-day closing balance rollups
     for (const t of txns) {
-      insert('bank_transactions', {
+      await insert('bank_transactions', {
         id: uid('btx'), company_id: companyId, account_id: account.id,
         external_id: t.external_id, txn_date: t.txn_date, value_date: t.value_date,
         amount: t.amount, balance_after: t.balance_after, description: t.description,
@@ -212,12 +213,12 @@ function generateAccountHistory(companyId, account, opts = {}) {
     for (let k = 0; k < 30; k++) {
       const date = addDays(start, k);
       if (dayBalances.has(date)) carry = dayBalances.get(date);
-      insert('cash_daily', {
+      await insert('cash_daily', {
         id: uid('cd'), company_id: companyId, account_id: account.id,
         date, closing_balance: carry, source: 'aa',
       });
     }
-    update('bank_accounts', account.id, { last_synced_at: nowIso(), status: 'active' });
+    await update('bank_accounts', account.id, { last_synced_at: nowIso(), status: 'active' });
   }
   return txns;
 }
@@ -232,35 +233,36 @@ const PaymentGateway = {
     // Real: RAZORPAYX Payout Batch API. Here: schedule jobs with async lifecycle.
     for (const p of payments) {
       const delay = p.type === 'instant' ? 600 : (p.scheduled_date && p.scheduled_date > todayStr()) ? 8000 : 2500;
-      queue.enqueue(companyId, 'gateway.execute', { paymentId: p.id }, { delayMs: delay });
+      await queue.enqueue(companyId, 'gateway.execute', { paymentId: p.id }, { delayMs: delay });
     }
     return { accepted: payments.length };
   },
 
   async execute(paymentId) {
-    const p = get('SELECT * FROM payments WHERE id = ?', [paymentId]);
+    const p = await get('SELECT * FROM payments WHERE id = ?', [paymentId]);
     if (!p) throw new Error('payment not found');
-    update('payments', paymentId, { status: 'processing', processed_at: nowIso() });
+    await update('payments', paymentId, { status: 'processing', processed_at: nowIso() });
 
     const fail = hashCode(paymentId) % 25 === 0; // deterministic ~4% failure for demo
     const latency = p.mode === 'UPI' || p.mode === 'IMPS' ? 1200 : p.mode === 'RTGS' ? 2200 : 1800;
     return new Promise((resolve) => {
-      setTimeout(() => {
+      setTimeout(async () => {
         if (fail) {
-          update('payments', paymentId, { status: 'failed', failure_reason: 'Bank declined: insufficient funds in debit account' });
-          queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'failed' });
+          await update('payments', paymentId, { status: 'failed', failure_reason: 'Bank declined: insufficient funds in debit account' });
+          await queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'failed' });
           resolve({ status: 'failed' });
         } else {
           const utr = 'UTR' + String(Math.floor(Math.random() * 90000000000) + 10000000000);
-          update('payments', paymentId, {
+          await update('payments', paymentId, {
             status: 'completed', gateway_txn_id: utr, processed_at: nowIso(),
             reference: p.reference || utr,
           });
-          const ids = (p.invoice_ids || '').split(',').map(s => s.trim()).filter(Boolean);
+          let ids = [];
+          try { ids = JSON.parse(p.invoice_ids || '[]'); } catch { ids = String(p.invoice_ids || '').split(',').map(s => s.trim()).filter(Boolean); }
           if (ids.length) {
-            run(`UPDATE invoices SET status='paid', paid_at=? WHERE id IN (${ids.map(() => '?').join(',')})`, [nowIso(), ...ids]);
+            await run(`UPDATE invoices SET status='paid', paid_at=? WHERE id IN (${ids.map(() => '?').join(',')})`, [nowIso(), ...ids]);
           }
-          queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'completed' });
+          await queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'completed' });
           resolve({ status: 'completed', utr });
         }
       }, latency);
@@ -277,9 +279,9 @@ const TallyConnector = {
   name: 'mock-tallyprime-odbc',
   version: 'TallyPrime 4.2',
 
-  health(companyId) {
-    const h = get('SELECT * FROM tally_health WHERE company_id = ?', [companyId]);
-    const q = get(`SELECT COUNT(*) AS c FROM tally_sync_logs WHERE company_id = ? AND status IN ('queued','retrying')`, [companyId]);
+  async health(companyId) {
+    const h = await get('SELECT * FROM tally_health WHERE company_id = ?', [companyId]);
+    const q = await get(`SELECT COUNT(*) AS c FROM tally_sync_logs WHERE company_id = ? AND status IN ('queued','retrying')`, [companyId]);
     return {
       ...(h || {}),
       queue_depth: q ? q.c : 0,
@@ -287,22 +289,20 @@ const TallyConnector = {
     };
   },
 
-  heartbeat(companyId) {
-    const h = get('SELECT * FROM tally_health WHERE company_id = ?', [companyId]);
+  async heartbeat(companyId) {
+    const h = await get('SELECT * FROM tally_health WHERE company_id = ?', [companyId]);
     const uptime = h && h.uptime_30d != null ? h.uptime_30d : 99.72;
     const now = nowIso();
     if (h) {
-      update('tally_health', h.company_id, {
-        last_sync_at: now, last_success_at: now, status: 'connected',
-        uptime_30d: Math.min(99.9, inr(uptime + 0.001)),
-      });
+      await run(`UPDATE tally_health SET last_sync_at = ?, last_success_at = ?, status = 'connected', uptime_30d = ? WHERE company_id = ?`,
+        [now, now, Math.min(99.9, inr(uptime + 0.001)), companyId]);
     } else {
-      insert('tally_health', { company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 99.72 });
+      await insert('tally_health', { company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 99.72 });
     }
   },
 
-  logSync(companyId, entity, entityId, action, status, error) {
-    insert('tally_sync_logs', {
+  async logSync(companyId, entity, entityId, action, status, error) {
+    await insert('tally_sync_logs', {
       id: uid('tsl'), company_id: companyId, entity, entity_id: entityId, action,
       status, error: error || null, queued_at: nowIso(),
       synced_at: status === 'synced' ? nowIso() : null,
@@ -310,33 +310,33 @@ const TallyConnector = {
   },
 
   // Invoice approved -> create purchase voucher in Tally
-  createPurchaseVoucher(invoiceId) {
-    const inv = get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
+  async createPurchaseVoucher(invoiceId) {
+    const inv = await get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
     if (!inv) return;
-    TallyConnector.logSync(inv.company_id, 'voucher', invoiceId, 'create', 'queued');
+    await TallyConnector.logSync(inv.company_id, 'voucher', invoiceId, 'create', 'queued');
     // simulated single-user contention: brief queue before syncing
-    setTimeout(() => {
-      run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), invoiceId]);
-      TallyConnector.heartbeat(inv.company_id);
+    setTimeout(async () => {
+      await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), invoiceId]);
+      await TallyConnector.heartbeat(inv.company_id);
     }, 900);
   },
 
-  syncPaymentToTally(paymentId) {
-    const p = get('SELECT * FROM payments WHERE id = ?', [paymentId]);
+  async syncPaymentToTally(paymentId) {
+    const p = await get('SELECT * FROM payments WHERE id = ?', [paymentId]);
     if (!p) return;
     const synced = p.status === 'completed';
-    TallyConnector.logSync(p.company_id, 'voucher', paymentId, 'create', synced ? 'queued' : 'failed', synced ? null : 'payment failed, voucher not created');
+    await TallyConnector.logSync(p.company_id, 'voucher', paymentId, 'create', synced ? 'queued' : 'failed', synced ? null : 'payment failed, voucher not created');
     if (synced) {
-      setTimeout(() => {
-        run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), paymentId]);
-        TallyConnector.heartbeat(p.company_id);
+      setTimeout(async () => {
+        await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), paymentId]);
+        await TallyConnector.heartbeat(p.company_id);
       }, 1000);
     }
   },
 };
 
-queue.on('tally.syncVoucher', async (job, payload) => { TallyConnector.createPurchaseVoucher(payload.invoiceId); });
-queue.on('tally.syncPayment', async (job, payload) => { TallyConnector.syncPaymentToTally(payload.paymentId); });
+queue.on('tally.syncVoucher', async (job, payload) => { await TallyConnector.createPurchaseVoucher(payload.invoiceId); });
+queue.on('tally.syncPayment', async (job, payload) => { await TallyConnector.syncPaymentToTally(payload.paymentId); });
 
 // ----------------------------------------------------------------------------
 // OCR ENGINE (trained on Indian GST invoice formats)
@@ -468,34 +468,37 @@ function normalizeDate(s) {
 // GST DATA PROVIDER (GSTN e-invoice + GSTR-2B)
 // ----------------------------------------------------------------------------
 const GstDataProvider = {
-  name: 'mock-gstn-gstr2b',
+  name: 'gstn-gsp',
 
   currentPeriod() { return todayStr().slice(0, 7); },
 
-  fetchGstr2b(companyId, period) {
-    const company = get('SELECT * FROM companies WHERE id = ?', [companyId]);
-    const monthStart = period + '-01';
-    const monthEnd = addDays(monthStart, 31).slice(0, 10);
-    const invs = all(`SELECT * FROM invoices WHERE company_id = ? AND invoice_date >= ? AND invoice_date <= ? AND gstin_vendor IS NOT NULL`,
-      [companyId, monthStart, monthEnd]);
-    const itc = (r) => inr(invs.reduce((s, i) => s + (i[r] || 0), 0));
+  async fetchGstr2b(companyId, period) {
+    const company = await get('SELECT * FROM companies WHERE id = ?', [companyId]);
+    const gstin = company.gstin;
+    // Delegate to the GSP/GSTN adapter (server/src/gstn.js). In mock mode it
+    // builds a realistic GSP-shaped GSTR-2B payload from platform invoices
+    // (first invoice not yet reflected, second at 88% value) so the mismatch
+    // scan always finds real flags; in live mode it fetches GSTR-2B through
+    // the configured GSP and maps the response to the same row shape.
+    const raw = await Gstn.fetchGstr2bRaw(companyId, period, gstin);
+    const mapped = Gstn.mapGstr2b(raw, { period, gstin });
     const snapshot = {
       id: uid('g2b'), company_id: companyId, period,
-      gstin: company.gstin,
-      total_itc: inr(itc('cgst') + itc('sgst') + itc('igst')),
-      itc_cgst: itc('cgst'), itc_sgst: itc('sgst'), itc_igst: itc('igst'),
-      data_json: JSON.stringify(invs.map(i => ({ invoice_no: i.invoice_no, gstin: i.gstin_vendor, taxable: i.taxable_amount, cgst: i.cgst, sgst: i.sgst, igst: i.igst }))),
-      source: 'gstr2b', fetched_at: nowIso(),
+      gstin,
+      total_itc: mapped.total_itc,
+      itc_cgst: mapped.itc_cgst, itc_sgst: mapped.itc_sgst, itc_igst: mapped.itc_igst,
+      data_json: JSON.stringify(mapped.invoices),
+      source: mapped.source, fetched_at: mapped.fetched_at,
     };
-    insert('gstr2b_snapshots', snapshot);
+    await insert('gstr2b_snapshots', snapshot);
     return snapshot;
   },
 
   // Scan for mismatches between platform invoices and GSTR-2B snapshot.
-  scanMismatches(companyId, period) {
-    const snap = get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? AND period = ? ORDER BY fetched_at DESC LIMIT 1', [companyId, period]);
+  async scanMismatches(companyId, period) {
+    const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? AND period = ? ORDER BY fetched_at DESC LIMIT 1', [companyId, period]);
     if (!snap) return [];
-    const invs = all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id WHERE i.company_id = ? AND i.invoice_date LIKE ? AND i.gstin_vendor IS NOT NULL`, [companyId, period + '%']);
+    const invs = await all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id WHERE i.company_id = ? AND i.invoice_date LIKE ? AND i.gstin_vendor IS NOT NULL`, [companyId, period + '%']);
     const g2b = JSON.parse(snap.data_json || '[]');
     const g2bMap = new Map(g2b.map(g => [g.invoice_no, g]));
     const mismatches = [];
@@ -509,14 +512,14 @@ const GstDataProvider = {
       }
     }
     for (const mm of mismatches) {
-      insert('gst_mismatches', { id: uid('gm'), company_id: companyId, period, invoice_no: mm.invoice_no, vendor_gstin: mm.vendor_gstin, vendor_name: mm.vendor_name, platform_amount: mm.platform_amount, gstr2b_amount: mm.gstr2b_amount, variance: mm.variance, status: 'open', note: mm.note });
+      await insert('gst_mismatches', { id: uid('gm'), company_id: companyId, period, invoice_no: mm.invoice_no, vendor_gstin: mm.vendor_gstin, vendor_name: mm.vendor_name, platform_amount: mm.platform_amount, gstr2b_amount: mm.gstr2b_amount, variance: mm.variance, status: 'open', note: mm.note });
     }
     return mismatches;
   },
 
-  exportGstr3b(companyId, period) {
-    const snap = get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? AND period = ? ORDER BY fetched_at DESC LIMIT 1', [companyId, period]);
-    const invs = all(`SELECT * FROM invoices WHERE company_id = ? AND invoice_date LIKE ?`, [companyId, period + '%']);
+  async exportGstr3b(companyId, period) {
+    const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? AND period = ? ORDER BY fetched_at DESC LIMIT 1', [companyId, period]);
+    const invs = await all(`SELECT * FROM invoices WHERE company_id = ? AND invoice_date LIKE ?`, [companyId, period + '%']);
     const outSales = invs.filter(i => i.status !== 'rejected').reduce((s, i) => s + i.taxable_amount, 0);
     const outGst = invs.filter(i => i.status !== 'rejected').reduce((s, i) => s + (i.cgst || 0) + (i.sgst || 0) + (i.igst || 0), 0);
     const itc = snap ? snap.total_itc : 0;
@@ -538,9 +541,9 @@ const GstDataProvider = {
 // ----------------------------------------------------------------------------
 const EmailInbox = {
   forwardingRule: 'forward@invoices.khataos.in',
-  forward(companyId, from, subject, body) {
+  async forward(companyId, from, subject, body) {
     const id = uid('mail');
-    insert('email_inbox', {
+    await insert('email_inbox', {
       id, company_id: companyId, from_email: from, subject, body,
       attachments: JSON.stringify([{ name: 'tax_invoice.pdf' }]),
       received_at: nowIso(), processed: 0,
@@ -549,18 +552,18 @@ const EmailInbox = {
   },
 };
 
-function processEmail(mailId) {
-  const mail = get('SELECT * FROM email_inbox WHERE id = ?', [mailId]);
+async function processEmail(mailId) {
+  const mail = await get('SELECT * FROM email_inbox WHERE id = ?', [mailId]);
   if (!mail) throw new Error('mail not found');
   const ocr = OcrEngine.extract(mail.body);
   const invId = uid('inv');
-  const vendor = get('SELECT * FROM vendors WHERE company_id = ? AND (gstin = ? OR lower(name) LIKE ?) LIMIT 1',
+  const vendor = await get('SELECT * FROM vendors WHERE company_id = ? AND (gstin = ? OR lower(name) LIKE ?) LIMIT 1',
     [mail.company_id, ocr.gstin || '', `%${(ocr.supplier_name || '').split(' ')[0]}%`]);
   const taxable = ocr.taxable_amount != null ? ocr.taxable_amount : 0;
   const cgst = ocr.cgst || 0, sgst = ocr.sgst || 0, igst = ocr.igst || 0;
   const tds = ocr.tds_amount || 0;
   const gross = ocr.grand_total != null ? ocr.grand_total : taxable + cgst + sgst + igst;
-  insert('invoices', {
+  await insert('invoices', {
     id: invId, company_id: mail.company_id,
     invoice_no: ocr.invoice_no || 'MAN-' + String(Date.now()).slice(-6),
     vendor_id: vendor ? vendor.id : null,
@@ -577,24 +580,24 @@ function processEmail(mailId) {
     created_by: 'email-forward', created_at: nowIso(),
   });
   for (const line of ocr.hsns) {
-    insert('invoice_lines', { id: uid('l'), invoice_id: invId, hsn: line.hsn, description: line.description, qty: line.qty || 1, rate: line.rate || 0, taxable: line.taxable || 0, cgst: line.cgst || 0, sgst: line.sgst || 0, igst: 0, cess: 0 });
+    await insert('invoice_lines', { id: uid('l'), invoice_id: invId, hsn: line.hsn, description: line.description, qty: line.qty || 1, rate: line.rate || 0, taxable: line.taxable || 0, cgst: line.cgst || 0, sgst: line.sgst || 0, igst: 0, cess: 0 });
   }
-  run(`UPDATE email_inbox SET processed = 1, invoice_id = ? WHERE id = ?`, [invId, mailId]);
-  run(`UPDATE invoices SET status='pending_approval' WHERE id = ?`, [invId]);
-  createApprovalChain(mail.company_id, invId);
+  await run(`UPDATE email_inbox SET processed = 1, invoice_id = ? WHERE id = ?`, [invId, mailId]);
+  await run(`UPDATE invoices SET status='pending_approval' WHERE id = ?`, [invId]);
+  await createApprovalChain(mail.company_id, invId);
   return get('SELECT * FROM invoices WHERE id = ?', [invId]);
 }
 
 // Build the multi-level approval chain per tenant rules:
 // <= threshold -> one level (finance manager); > threshold -> level 2 CFO too.
-function createApprovalChain(companyId, invoiceId) {
-  const inv = get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
-  const settings = get('SELECT settings FROM companies WHERE id = ?', [companyId]);
+async function createApprovalChain(companyId, invoiceId) {
+  const inv = await get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
+  const settings = await get('SELECT settings FROM companies WHERE id = ?', [companyId]);
   const cfg = JSON.parse(settings.settings || '{}');
   const threshold = cfg.cfo_approval_threshold || 100000;
-  insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 1, required_role: 'finance_manager', threshold_note: `<= ₹${threshold.toLocaleString('en-IN')} route`, status: 'pending' });
+  await insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 1, required_role: 'finance_manager', threshold_note: `<= ₹${threshold.toLocaleString('en-IN')} route`, status: 'pending' });
   if (inv.gross_amount > threshold) {
-    insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 2, required_role: 'cfo', threshold_note: `> ₹${threshold.toLocaleString('en-IN')} requires CFO`, status: 'pending' });
+    await insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 2, required_role: 'cfo', threshold_note: `> ₹${threshold.toLocaleString('en-IN')} requires CFO`, status: 'pending' });
   }
 }
 

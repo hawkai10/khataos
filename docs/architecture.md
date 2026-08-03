@@ -5,12 +5,29 @@
 | Concern | MVP (this repo) | Production target | Why |
 | --- | --- | --- | --- |
 | API services | Node.js 22, built-in `node:http`, zero deps | Node.js (Fastify/NestJS) or Python | Node chosen for fast iteration and single language across stack |
-| Transactional DB | SQLite (`node:sqlite`) | PostgreSQL 16 (Aurora) | Same relational model, zero-friction demo |
+| Transactional DB | SQLite (`node:sqlite`) **or** PostgreSQL (in-process `pglite` / server via `KHATAOS_DATABASE_URL`) | PostgreSQL 16 (Aurora) | Storage layer is engine-swappable; same schema & async helpers across engines, verified by dual smoke suites |
 | Analytics | Derived queries + in-memory rollups | ClickHouse | 30-day cash trend + recon scoring need columnar scans |
 | Events | In-process async queue (see §4) | SQS + EventBridge / Kafka | Decouple slow bank/Tally/GST integrations from UI |
 | Region | localhost | AWS Mumbai (`ap-south-1`) | RBI data-localization for bank/PAN/GST data |
 | Auth | Session tokens + RBAC | OAuth 2.0 (PKCE) + SAML for SSO | Spec requires OAuth2 at launch; demo uses same role model |
 | Web | Vanilla JS SPA, responsive, tablet-first | React/Vite | MVP speed; no build toolchain |
+
+## Storage layer
+
+`server/src/db.js` exposes `{ all, get, run, insert, update, exec, listTables,
+countRows }` — async in every engine — plus `DB_ENGINE`/`DB_PATH` for
+introspection. The app never touches a driver directly, so switching databases
+is configuration, not code:
+
+```text
+engine = sqlite      -> node:sqlite (zero-setup dev/demo)
+engine = pglite      -> in-process PostgreSQL (WASM) for dev/testing
+engine = postgres    -> KHATAOS_DATABASE_URL (production, AWS Mumbai)
+```
+
+The System Health page (`/api/system/health`, "System Health" in the nav)
+reports the live engine, table counts, event-queue depth, and every
+integration's status — the same endpoint the smoke tests assert against.
 
 ## 2. Module boundaries (bounded contexts)
 
@@ -81,11 +98,25 @@ SDK and flipping a config flag.
 
 | Adapter | Interface | Real provider (Phase 1) | Simulator behavior |
 | --- | --- | --- | --- |
-| `BankDataProvider` | `startConsent`, `listAccounts`, `fetchTransactions`, `refresh` | Sahamati AA network (FIU) + ICICI/HDFC corporate APIs for unsupported banks | Generates realistic 90-day transaction history per account with Indian modes/narrations |
+| `BankDataProvider` | `startConsent`, `listAccounts`, `fetchTransactions`, `refresh` | **Decentro Connected Banking** (balance + statement, many banks via one API) as primary AIS; Sahamati AA (FIU) and ICICI/HDFC corporate APIs as alternates | Generates realistic 90-day transaction history per account with Indian modes/narrations |
 | `PaymentGateway` | `createBatch`, `schedule`, `execute`, `status`, `webhook` | RazorpayX, then Cashfree | Async lifecycle, deterministic ~4% failure for demo, UTR generation |
 | `TallyConnector` | `syncVouchers`, `createVoucher`, `queue`, `health`, `installer` | Windows service over Tally ODBC + XML export (TallyPrime ≥ 2.1) | Simulated ledger/voucher sync, single-user queueing, health pings |
 | `OcrEngine` | `extractInvoice(image/pdf/text)` | Document AI / custom model trained on Indian GST invoice formats | Rule+keyword extraction for Indian invoices: GSTIN, HSN, CGST/SGST/IGST, bilingual narrations |
-| `GstDataProvider` | `fetchGstr2b`, `exportReturn` | GSTN e-invoice API + GSTR-2B | Period snapshots with injected mismatches for demo |
+| `GstDataProvider` | `fetchGstr2b`, `scanMismatches`, `exportReturn` | GSP/GSTN taxpayer API (GSTR-2B `b2b` fetch) + e-invoice IRP (IRN generation), implemented in `server/src/gstn.js` | Deterministic GSP-shaped GSTR-2B payload with injected mismatches for demo |
+
+The Decentro adapter (`server/src/decentro.js`) is live API code, not a stub:
+it calls Decentro's `/v2/banking/account/{acc}/balance` and `/statement`
+endpoints with header auth and maps responses into the same transaction model.
+It activates when `DECENTRO_*` env vars are present and gracefully falls back
+to the simulator otherwise (see `docs/decentro.md`).
+
+The GSTN adapter (`server/src/gstn.js`) is likewise live API code: it models
+the GSP taxpayer-API contract (OTP request â†’ `AUTHTOKEN` â†’ GSTR-2B fetch) and
+the e-invoice IRP `generate` call, and delegates the platform's GSTR-2B
+refresh through it. It activates when `GSTN_*` env vars are present (unless
+`GSTN_MOCK=1`) and otherwise generates a realistic GSP-shaped payload from the
+platform's invoices so the mismatch pipeline runs identically (see
+`docs/gstn.md`).
 
 ## 6. TallyPrime connector
 

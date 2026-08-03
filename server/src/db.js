@@ -1,18 +1,37 @@
 'use strict';
 
+// ============================================================================
+// Storage layer — one API, three engines:
+//   sqlite   (default)  — zero-setup dev/demo database (node:sqlite)
+//   pglite              — in-process PostgreSQL (WASM), for dev/testing
+//   postgres            — real PostgreSQL server (KHATAOS_DATABASE_URL)
+//
+// Every module talks through { all, get, run, insert, update } — async in all
+// engines — so switching databases is a configuration change, not a code one.
+// ============================================================================
+
 const path = require('path');
 const fs = require('fs');
-const { DatabaseSync } = require('node:sqlite');
+const os = require('os');
 
+const ENGINE = process.env.KHATAOS_DB_ENGINE || 'sqlite';
+const DATABASE_URL = process.env.KHATAOS_DATABASE_URL || '';
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const DB_PATH = process.env.KHATAOS_DB || path.join(DATA_DIR, 'khataos.db');
+const PRIMARY_DB = process.env.KHATAOS_DB || path.join(DATA_DIR, 'khataos.db');
 
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+let DB_PATH = PRIMARY_DB;
+let DB_ENGINE = ENGINE === 'sqlite' ? 'sqlite' : ENGINE === 'pglite' ? 'pglite' : ENGINE === 'postgres' || /^postgres(ql)?:\/\//.test(DATABASE_URL) ? 'postgres' : ENGINE;
 
-const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+function probeWritable(dir) {
+  try {
+    const probe = path.join(dir, `.khataos-probe-${process.pid}`);
+    fs.writeFileSync(probe, 'x');
+    fs.rmSync(probe, { force: true });
+    return true;
+  } catch { return false; }
+}
 
+// ---- shared schema (SQLite flavour) ----
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS companies (
   id TEXT PRIMARY KEY,
@@ -71,10 +90,10 @@ CREATE TABLE IF NOT EXISTS bank_accounts (
   bank_code TEXT NOT NULL REFERENCES banks(code),
   account_name TEXT NOT NULL,
   account_number TEXT NOT NULL,
-  type TEXT NOT NULL DEFAULT 'current',          -- current | savings | cash_credit
+  type TEXT NOT NULL DEFAULT 'current',
   ifsc TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active',          -- active | consent_expired | failed
-  source TEXT NOT NULL,                          -- 'aa' | 'direct_api'
+  status TEXT NOT NULL DEFAULT 'active',
+  source TEXT NOT NULL,
   consent_id TEXT,
   last_synced_at TEXT,
   opened_at TEXT NOT NULL
@@ -87,12 +106,12 @@ CREATE TABLE IF NOT EXISTS bank_transactions (
   external_id TEXT,
   txn_date TEXT NOT NULL,
   value_date TEXT,
-  amount REAL NOT NULL,                          -- signed: credit positive
+  amount REAL NOT NULL,
   balance_after REAL,
   description TEXT,
-  mode TEXT,                                     -- NEFT | IMPS | UPI | RTGS | CHQ | DD | CASH
+  mode TEXT,
   ref_no TEXT,
-  status TEXT NOT NULL DEFAULT 'posted',          -- posted | uncleared
+  status TEXT NOT NULL DEFAULT 'posted',
   matched INTEGER DEFAULT 0,
   matched_id TEXT,
   raw_json TEXT,
@@ -135,8 +154,8 @@ CREATE TABLE IF NOT EXISTS invoices (
   vendor_id TEXT REFERENCES vendors(id),
   invoice_date TEXT NOT NULL,
   due_date TEXT,
-  source TEXT NOT NULL,                          -- email | pdf_upload | manual
-  status TEXT NOT NULL,                          -- captured | validation_failed | pending_approval | approved | rejected | paid | scheduled
+  source TEXT NOT NULL,
+  status TEXT NOT NULL,
   gross_amount REAL NOT NULL DEFAULT 0,
   taxable_amount REAL NOT NULL DEFAULT 0,
   cgst REAL DEFAULT 0,
@@ -149,7 +168,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   hsns TEXT DEFAULT '[]',
   purchase_order_no TEXT,
   receipt_note_no TEXT,
-  three_way_match TEXT,                          -- none | matched | mismatch
+  three_way_match TEXT,
   ocr_json TEXT,
   notes TEXT,
   currency TEXT DEFAULT 'INR',
@@ -181,7 +200,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   level INTEGER NOT NULL DEFAULT 1,
   required_role TEXT,
   threshold_note TEXT,
-  status TEXT NOT NULL DEFAULT 'pending',         -- pending | approved | rejected
+  status TEXT NOT NULL DEFAULT 'pending',
   approver_id TEXT,
   approver_name TEXT,
   comment TEXT,
@@ -194,9 +213,9 @@ CREATE TABLE IF NOT EXISTS payments (
   vendor_id TEXT REFERENCES vendors(id),
   invoice_ids TEXT DEFAULT '[]',
   amount REAL NOT NULL,
-  mode TEXT NOT NULL,                            -- UPI | IMPS | NEFT | RTGS
-  type TEXT NOT NULL,                            -- batch | scheduled | instant
-  status TEXT NOT NULL,                          -- draft | pending_approval | approved | pending | processing | completed | failed
+  mode TEXT NOT NULL,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
   scheduled_date TEXT,
   bank_account_id TEXT,
   reference TEXT,
@@ -220,7 +239,7 @@ CREATE TABLE IF NOT EXISTS recon_matches (
   bank_txn_id TEXT NOT NULL REFERENCES bank_transactions(id),
   payment_id TEXT,
   tally_voucher_no TEXT,
-  match_type TEXT NOT NULL,                      -- exact | fuzzy | combined | manual
+  match_type TEXT NOT NULL,
   confidence REAL,
   status TEXT NOT NULL DEFAULT 'matched',
   matched_by TEXT,
@@ -231,7 +250,7 @@ CREATE TABLE IF NOT EXISTS recon_matches (
 CREATE TABLE IF NOT EXISTS gstr2b_snapshots (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL,
-  period TEXT NOT NULL,                          -- YYYY-MM
+  period TEXT NOT NULL,
   gstin TEXT,
   total_itc REAL DEFAULT 0,
   itc_cgst REAL DEFAULT 0,
@@ -259,10 +278,10 @@ CREATE TABLE IF NOT EXISTS gst_mismatches (
 CREATE TABLE IF NOT EXISTS tally_sync_logs (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL,
-  entity TEXT NOT NULL,                          -- ledger | voucher | payment | receipt | po | gstr2b
+  entity TEXT NOT NULL,
   entity_id TEXT,
-  action TEXT NOT NULL,                          -- push | pull | create | update
-  status TEXT NOT NULL,                          -- queued | synced | failed | retrying
+  action TEXT NOT NULL,
+  status TEXT NOT NULL,
   error TEXT,
   queued_at TEXT,
   synced_at TEXT
@@ -272,7 +291,7 @@ CREATE TABLE IF NOT EXISTS tally_health (
   company_id TEXT PRIMARY KEY,
   last_sync_at TEXT,
   last_success_at TEXT,
-  status TEXT NOT NULL DEFAULT 'connected',       -- connected | degraded | disconnected
+  status TEXT NOT NULL DEFAULT 'connected',
   queue_depth INTEGER DEFAULT 0,
   version TEXT DEFAULT 'TallyPrime 4.2',
   mode TEXT DEFAULT 'single-user',
@@ -283,7 +302,7 @@ CREATE TABLE IF NOT EXISTS tally_health (
 CREATE TABLE IF NOT EXISTS onboarding_steps (
   company_id TEXT NOT NULL,
   step TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',         -- pending | done
+  status TEXT NOT NULL DEFAULT 'pending',
   detail TEXT,
   at TEXT,
   PRIMARY KEY (company_id, step)
@@ -306,7 +325,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   company_id TEXT NOT NULL,
   type TEXT NOT NULL,
   payload TEXT DEFAULT '{}',
-  status TEXT NOT NULL DEFAULT 'queued',          -- queued | running | done | failed
+  status TEXT NOT NULL DEFAULT 'queued',
   attempts INTEGER DEFAULT 0,
   run_at TEXT,
   last_error TEXT,
@@ -321,29 +340,141 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   mau INTEGER DEFAULT 0,
   PRIMARY KEY (company_id, date)
 );
+
+CREATE TABLE IF NOT EXISTS decentro_links (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  account_number TEXT NOT NULL,
+  mobile TEXT,
+  customer_id TEXT,
+  bank_code TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  decentro_txn_id TEXT,
+  redirect_url TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  linked_at TEXT
+);
 `;
 
-db.exec(SCHEMA);
+// PostgreSQL flavour: amounts as double precision so they return as JS numbers
+// (identical to SQLite REAL semantics); flags stay INTEGER so `= 1` checks
+// keep working; dates/timestamps stay TEXT for identical formatting.
+const PG_SCHEMA = SCHEMA.replace(/\bREAL\b/g, 'DOUBLE PRECISION');
 
-// ---- tiny query helpers ----
-function all(sql, params = []) { return db.prepare(sql).all(...params); }
-function get(sql, params = []) { return db.prepare(sql).get(...params); }
-function run(sql, params = []) { return db.prepare(sql).run(...params); }
+// translate ? placeholders to $1..$n for PostgreSQL
+function translate(sql) {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
+}
 
-// Insert an object into a table. Returns lastInsertRowid.
-function insert(table, obj) {
+// ---- engine implementations ----
+let impl = null;
+let ready;
+
+if (DB_ENGINE === 'sqlite') {
+  const { DatabaseSync } = require('node:sqlite');
+  let sqliteDb;
+  try {
+    if (!fs.existsSync(path.dirname(PRIMARY_DB))) fs.mkdirSync(path.dirname(PRIMARY_DB), { recursive: true });
+    if (!probeWritable(path.dirname(PRIMARY_DB))) throw new Error('directory not writable');
+    sqliteDb = new DatabaseSync(PRIMARY_DB);
+    sqliteDb.exec('PRAGMA journal_mode = WAL;');
+    sqliteDb.exec('PRAGMA foreign_keys = ON;');
+    sqliteDb.exec(SCHEMA);
+  } catch (err) {
+    const fallbackDir = path.join(os.tmpdir(), 'khataos-data');
+    fs.mkdirSync(fallbackDir, { recursive: true });
+    DB_PATH = path.join(fallbackDir, 'khataos.db');
+    if (!probeWritable(fallbackDir)) {
+      console.error(`[db] Fatal: cannot open ${PRIMARY_DB} (${err.message}) or ${DB_PATH}`);
+      process.exit(1);
+    }
+    sqliteDb = new DatabaseSync(DB_PATH);
+    sqliteDb.exec('PRAGMA journal_mode = WAL;');
+    sqliteDb.exec('PRAGMA foreign_keys = ON;');
+    sqliteDb.exec(SCHEMA);
+    console.warn(`[db] Could not open ${PRIMARY_DB} (${err.message}). Using ${DB_PATH} instead.`);
+  }
+  impl = {
+    all: (sql, params) => sqliteDb.prepare(sql).all(...params),
+    get: (sql, params) => sqliteDb.prepare(sql).get(...params) || null,
+    run: (sql, params) => sqliteDb.prepare(sql).run(...params),
+    exec: (sql) => sqliteDb.exec(sql),
+  };
+  ready = Promise.resolve();
+} else {
+  // pglite or postgres — async init
+  ready = (async () => {
+    let client;
+    if (DB_ENGINE === 'postgres') {
+      const { Pool } = require('pg');
+      client = new Pool({ connectionString: DATABASE_URL, max: 10 });
+      await client.query(PG_SCHEMA);
+      impl = {
+        all: async (sql, params) => (await client.query(translate(sql), params)).rows,
+        get: async (sql, params) => (await client.query(translate(sql), params)).rows[0] || null,
+        run: async (sql, params) => { const r = await client.query(translate(sql), params); return { lastInsertRowid: null, rowCount: r.rowCount }; },
+        exec: async (sql) => { await client.query(sql); },
+      };
+    } else {
+      const { PGlite } = require('@electric-sql/pglite');
+      const pgliteDir = process.env.KHATAOS_PGLITE_DIR ? path.resolve(process.env.KHATAOS_PGLITE_DIR) : null;
+      client = pgliteDir && probeWritable(path.dirname(pgliteDir) || '.')
+        ? new PGlite(pgliteDir)
+        : new PGlite();
+      DB_PATH = pgliteDir || '(in-memory pglite)';
+      await client.exec(PG_SCHEMA);
+      impl = {
+        all: async (sql, params) => (await client.query(translate(sql), params)).rows,
+        get: async (sql, params) => (await client.query(translate(sql), params)).rows[0] || null,
+        run: async (sql, params) => { const r = await client.query(translate(sql), params); return { lastInsertRowid: null, rowCount: r.rowCount }; },
+        exec: async (sql) => { await client.exec(sql); },
+      };
+    }
+    if (DB_ENGINE === 'postgres') console.log(`[db] connected to PostgreSQL: ${DATABASE_URL.replace(/:\/\/[^@]+@/, '://***@')}`);
+    else console.log(`[db] using in-process PostgreSQL (pglite): ${DB_PATH}`);
+  })().catch((err) => {
+    console.error(`[db] Fatal: could not initialize ${DB_ENGINE} database: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+// ---- public async helpers (engine-agnostic) ----
+async function all(sql, params = []) { await ready; return impl.all(sql, params); }
+async function get(sql, params = []) { await ready; return impl.get(sql, params); }
+async function run(sql, params = []) { await ready; return impl.run(sql, params); }
+async function exec(sql) { await ready; return impl.exec(sql); }
+
+async function insert(table, obj) {
+  await ready;
   const keys = Object.keys(obj);
   const cols = keys.join(', ');
-  const marks = keys.map(() => '?').join(', ');
-  const res = run(`INSERT INTO ${table} (${cols}) VALUES (${marks})`, keys.map(k => obj[k]));
-  return res.lastInsertRowid;
+  const marks = keys.map((_, i) => (DB_ENGINE === 'sqlite' ? '?' : `$${i + 1}`)).join(', ');
+  await impl.run(`INSERT INTO ${table} (${cols}) VALUES (${marks})`, keys.map(k => obj[k]));
+  return { lastInsertRowid: null };
 }
 
-// Simple update by id
-function update(table, id, obj) {
+async function update(table, id, obj) {
+  await ready;
   const keys = Object.keys(obj);
-  const sets = keys.map(k => `${k} = ?`).join(', ');
-  run(`UPDATE ${table} SET ${sets} WHERE id = ?`, [...keys.map(k => obj[k]), id]);
+  const mark = (i) => (DB_ENGINE === 'sqlite' ? '?' : `$${i}`);
+  const sets = keys.map((k, i) => `${k} = ${mark(i + 1)}`).join(', ');
+  await impl.run(`UPDATE ${table} SET ${sets} WHERE id = ${mark(keys.length + 1)}`, [...keys.map(k => obj[k]), id]);
 }
 
-module.exports = { db, all, get, run, insert, update, DB_PATH };
+// ---- introspection (System Health page + tests) ----
+async function listTables() {
+  await ready;
+  if (DB_ENGINE === 'sqlite') return (await impl.all(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`, [])).map(r => r.name);
+  return (await impl.all(`SELECT tablename AS name FROM pg_tables WHERE schemaname = 'public' ORDER BY name`, [])).map(r => r.name);
+}
+
+async function countRows(table) {
+  await ready;
+  if (!/^[a-z0-9_]+$/.test(table)) throw new Error('invalid table name');
+  const r = await impl.get(`SELECT COUNT(*) AS c FROM "${table}"`, []);
+  return Number(r ? r.c : 0);
+}
+
+module.exports = { all, get, run, insert, update, exec, listTables, countRows, DB_PATH, DB_ENGINE, DATABASE_URL };

@@ -33,6 +33,14 @@ function diffDays(a, b) {
   return Math.round((db - da) / 86400000);
 }
 
+// Minutes elapsed since an ISO timestamp (UTC-safe).
+function minsSince(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 60000));
+}
+
 function nowIso() { return new Date().toISOString(); }
 
 // ---- money ----
@@ -75,6 +83,6 @@ function verifyPassword(pw, stored) {
 }
 
 module.exports = {
-  mulberry32, todayStr, daysAgo, daysAhead, addDays, diffDays, nowIso,
+  mulberry32, todayStr, daysAgo, daysAhead, addDays, diffDays, minsSince, nowIso,
   inr, formatINR, uid, shortRef, hashPassword, verifyPassword,
 };

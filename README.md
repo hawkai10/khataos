@@ -28,6 +28,42 @@ node server/src/server.js
 
 Open <http://localhost:8080> and log in with one of the demo users:
 
+### Real bank data via Decentro (optional)
+
+The MVP ships with realistic simulated bank feeds so the whole product can be
+demoed offline. To fetch **real** balances and statements, set Decentro
+Connected Banking credentials (sandbox or live) and restart:
+
+```powershell
+$env:DECENTRO_CLIENT_ID = "…"; $env:DECENTRO_CLIENT_SECRET = "…"
+$env:DECENTRO_MODULE_SECRET = "…"; $env:DECENTRO_PROVIDER_SECRET = "…"
+node server/src/server.js
+```
+
+Then **Cash & Banks → Connect a bank → Decentro Connected Banking**. Full
+guide, endpoints, and mapping: [docs/decentro.md](docs/decentro.md). Without
+these vars the app uses the simulator and reports Decentro as "not
+configured".
+
+### Real GST data via a GSTN/GSP (optional)
+
+The GST module ships with a deterministic GSTR-2B simulator (GSP-shaped
+payload built from the platform's own invoices, with injected mismatches so
+the ITC scan always has real flags). To fetch **real** GSTR-2B data, set the
+tenant's GSTN/GSP credentials and restart:
+
+```powershell
+$env:GSTN_GSTIN = "29AABCA1234F1Z5"
+$env:GSTN_USERNAME = "..." ; $env:GSTN_APP_KEY = "..."
+$env:GSTN_CLIENT_ID = "..." ; $env:GSTN_CLIENT_SECRET = "..."
+node server/src/server.js
+```
+
+The adapter also models the e-invoice IRP `generate` contract. Auth flow is
+OTP request -> AUTHTOKEN, exactly like the GSP portal. Full guide, endpoints,
+mapping, and go-live steps: [docs/gstn.md](docs/gstn.md). Check status at
+`GET /api/gstn/config` or under `integrations.gstn` in System Health.
+
 | Role | Email | Password | Can do |
 | --- | --- | --- | --- |
 | CFO / Admin | `cfo@acme.in` | `demo1234` | Everything, including > ₹1L approvals |
@@ -38,6 +74,26 @@ The database is auto-seeded on first run with a demo company (Acme Industries,
 GSTIN `29AABCA1234F1Z5`), 6 bank accounts across 5 banks, 30 days of cash
 history, vendors, invoices in every workflow state, payments, GSTR-2B data,
 and Tally sync state — everything needed to demo all 7 modules immediately.
+
+### Database engines
+
+The storage layer is engine-swappable — same schema, same API, no code
+changes:
+
+| Engine | How to enable | Use for |
+| --- | --- | --- |
+| SQLite (default) | nothing to do | Zero-setup dev & demo |
+| PostgreSQL in-process | `KHATAOS_DB_ENGINE=pglite` | Dev/testing with real Postgres semantics |
+| PostgreSQL server | `KHATAOS_DATABASE_URL=postgres://user:pass@host:5432/khataos` | Production (AWS Mumbai, RBI data-localized) |
+
+```powershell
+node server/src/server.js                          # SQLite
+$env:KHATAOS_DB_ENGINE = "pglite"; node server/src/server.js
+$env:KHATAOS_DATABASE_URL = "postgres://…"; node server/src/server.js
+```
+
+Both smoke suites run green — SQLite and PostgreSQL (in-process) — via
+`node tests/smoke.js` and `node tests/smoke.js --pg`.
 
 Reset the demo at any time by deleting `server/data/khataos.db` and restarting.
 
@@ -69,6 +125,8 @@ khataos/
     src/
       server.js    HTTP server, routing, static web serving
       db.js        SQLite schema (node:sqlite), migrations
+      decentro.js  Decentro Connected Banking adapter (real API)
+      gstn.js      GSP/GSTN adapter (GSTR-2B fetch + e-invoice IRN contract)
       seed.js      deterministic demo data generator
       adapters.js  integration adapters (simulated): AA, bank APIs, gateway,
                    OCR, Tally, GSTN
@@ -77,7 +135,7 @@ khataos/
     data/          khataos.db (created at runtime)
   web/             responsive SPA (no build step)
   deploy/          production artifacts: Postgres/ClickHouse, AWS notes
-  tests/smoke.js   end-to-end API smoke test
+  tests/           smoke.js (end-to-end API), decentro.test.js, gstn.test.js
 ```
 
 ## What the MVP deliberately excludes
