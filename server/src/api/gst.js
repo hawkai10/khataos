@@ -1,6 +1,7 @@
 'use strict';
 
-// GST domain: GSTR-2B summary/refresh/export and the GSTN/GSP auth contract.
+// GST domain (Fastify plugin): GSTR-2B summary/refresh/export and the
+// GSTN/GSP auth contract.
 
 const { get, all } = require('../db');
 const { inr } = require('../util');
@@ -11,17 +12,15 @@ const Gst = require('../services/gst');
 const { bodyOf } = require('./validators');
 const { companyOf, parseUrl, queryParam } = require('./helpers');
 
-function register(r, deps) {
-  const { ok } = deps;
-
-  r.get('/api/gst/summary', async (req, res, p, user) => {
-    const coId = companyOf(user);
+async function register(fastify) {
+  fastify.get('/api/gst/summary', async (request, reply) => {
+    const coId = companyOf(request.user);
     const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? ORDER BY period DESC LIMIT 1', [coId]);
     const liability = await Gst.netPayableSum(coId, ['approved', 'scheduled']);
     const committed = await Gst.netPayableSum(coId, ['approved', 'scheduled', 'pending_approval']);
     const mismatches = await all(`SELECT * FROM gst_mismatches WHERE company_id = ? AND status = 'open' ORDER BY period DESC`, [coId]);
     const periods = await all('SELECT period, MAX(fetched_at) AS fetched_at FROM gstr2b_snapshots WHERE company_id = ? GROUP BY period ORDER BY period DESC', [coId]);
-    ok(res, {
+    reply.ok({
       itc: snap ? snap.total_itc : 0, itc_cgst: snap ? snap.itc_cgst : 0,
       itc_sgst: snap ? snap.itc_sgst : 0, itc_igst: snap ? snap.itc_igst : 0,
       period: snap ? snap.period : null, fetched_at: snap ? snap.fetched_at : null,
@@ -29,18 +28,19 @@ function register(r, deps) {
     });
   });
 
-  r.post('/api/gst/refresh', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.post('/api/gst/refresh', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
     const period = GstDataProvider.currentPeriod();
     await GstDataProvider.fetchGstr2b(coId, period);
     const mismatches = await GstDataProvider.scanMismatches(coId, period);
     await audit(coId, user, 'gst.refresh', 'gstr2b', period, { mismatches: mismatches.length });
-    ok(res, { period, mismatches: mismatches.length });
+    reply.ok({ period, mismatches: mismatches.length });
   });
 
-  r.get('/api/gst/export', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const u = parseUrl(req);
+  fastify.get('/api/gst/export', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const u = parseUrl(request);
     const type = queryParam(u, 'type', 'gstr3b');
     const period = queryParam(u, 'period', GstDataProvider.currentPeriod());
     let csv;
@@ -51,28 +51,27 @@ function register(r, deps) {
     } else {
       csv = 'field,amount\n' + await GstDataProvider.exportGstr3b(coId, period);
     }
-    res.writeHead(200, { 'content-type': 'text/csv', 'content-disposition': `attachment; filename="${type}_${period}.csv"` });
-    res.end(csv);
+    reply.type('text/csv').header('content-disposition', `attachment; filename="${type}_${period}.csv"`).send(csv);
   });
 
   // ---- GSTN / GSP (GSTR-2B + e-invoice contract) ----
-  r.get('/api/gstn/config', async (req, res) => {
-    ok(res, Gstn.config());
+  fastify.get('/api/gstn/config', async (request, reply) => {
+    reply.ok(Gstn.config());
   });
 
-  r.post('/api/gstn/otp/request', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.post('/api/gstn/otp/request', async (request, reply) => {
+    const coId = companyOf(request.user);
     const out = await Gstn.requestOtp();
-    await audit(coId, user, 'gstn.otp_request', 'gstn', null, { mode: out.mode, gstin: out.gstin });
-    ok(res, out);
+    await audit(coId, request.user, 'gstn.otp_request', 'gstn', null, { mode: out.mode, gstin: out.gstin });
+    reply.ok(out);
   });
 
-  r.post('/api/gstn/otp/validate', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const { otp } = bodyOf(req);
+  fastify.post('/api/gstn/otp/validate', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const { otp } = bodyOf(request);
     const out = await Gstn.validateOtp(otp);
-    await audit(coId, user, 'gstn.otp_validated', 'gstn', null, { mode: out.mode, expiry_minutes: out.expiry_minutes });
-    ok(res, out);
+    await audit(coId, request.user, 'gstn.otp_validated', 'gstn', null, { mode: out.mode, expiry_minutes: out.expiry_minutes });
+    reply.ok(out);
   });
 }
 
