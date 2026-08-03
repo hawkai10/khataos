@@ -2,14 +2,12 @@
 
 // ============================================================================
 // Fastify application builder. Replaces the hand-rolled http.createServer +
-// Router stack while preserving the exact HTTP contract:
+// manual Router stack while preserving the exact HTTP contract:
 //   - same JSON envelope { ok: true, data } / { ok: false, error: {...} }
 //   - same auth model (cookie/Bearer session + PUBLIC_API allowlist + 401s)
 //   - same rate limits, structured request log, 4MB body limit, static/SPA
 //     serving and test-hook routes
-// Domain modules are registered as Fastify plugins; modules not yet converted
-// are bridged from the legacy Router via registerLegacy() so the server can
-// run fully during the incremental migration.
+// Domain modules are registered as Fastify plugins.
 // ============================================================================
 
 const fastifyFactory = require('fastify');
@@ -17,7 +15,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { ApiError, currentUser } = require('../auth');
-const { Router, ok } = require('../router');
 
 const WEB_ROOT = path.join(__dirname, '..', '..', '..', 'web');
 const FRONTEND_DIST = path.join(__dirname, '..', '..', '..', 'webapp', 'dist');
@@ -90,46 +87,6 @@ async function serveStatic(reply, pathname) {
   reply.code(200).type(MIME[ext] || 'application/octet-stream').send(buf);
 }
 
-// Shim a legacy (req, res, params, user) handler onto Fastify's reply.
-function createResShim(reply) {
-  const shim = {
-    ended: false,
-    headersSent: false,
-    writeHead(code, headers) { shim.code = code; shim.headers = headers || {}; },
-    setHeader(k, v) { shim.headers = shim.headers || {}; shim.headers[k] = v; },
-    end(body) {
-      shim.ended = true;
-      reply.code(shim.code || 200);
-      if (shim.headers && Object.keys(shim.headers).length) reply.headers(shim.headers);
-      if (body == null) return reply.send();
-      if (typeof body === 'string') {
-        const t = body.trim();
-        if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
-          try { return reply.send(JSON.parse(body)); } catch { /* raw */ }
-        }
-        return reply.send(body);
-      }
-      return reply.send(body);
-    },
-  };
-  return shim;
-}
-
-// Mount every route still registered on the legacy Router as a Fastify route.
-function registerLegacy(fastify, router) {
-  for (const route of router.routes) {
-    fastify.route({
-      method: route.method,
-      url: route.pattern,
-      handler: async (request, reply) => {
-        const shim = createResShim(reply);
-        const result = await route.handler(request, shim, request.params || {}, request.user);
-        if (!shim.ended) reply.ok(result);
-      },
-    });
-  }
-}
-
 async function buildApp() {
   const fastify = fastifyFactory({
     bodyLimit: 4 * 1024 * 1024,
@@ -196,17 +153,13 @@ async function buildApp() {
   const { registerDomains } = require('../api');
   await registerDomains(fastify);
 
-  // Any module not yet converted rides the legacy router through the bridge.
-  const { createRouter } = require('../api');
-  const { CONVERTED } = require('../api');
-  const legacy = createRouter({ exclude: CONVERTED });
+  // Test-only routes (E2E suite), never enabled in production.
   if (process.env.KHATAOS_TEST_HOOKS === '1') {
-    const { installTestHooks } = require('../test-hooks');
-    installTestHooks(legacy);
+    const { registerTestHooks } = require('../test-hooks');
+    await registerTestHooks(fastify);
   }
-  registerLegacy(fastify, legacy);
 
   return fastify;
 }
 
-module.exports = { buildApp, serveStatic, createResShim, ok, Router };
+module.exports = { buildApp, serveStatic };

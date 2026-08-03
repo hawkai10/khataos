@@ -1,6 +1,6 @@
 'use strict';
 
-// Shared plumbing for domain routers: company scoping and query-string parsing.
+// Shared plumbing for domain plugins: company scoping and query-string parsing.
 
 function companyOf(user) { return user.company_id; }
 

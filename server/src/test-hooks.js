@@ -1,12 +1,12 @@
 'use strict';
 
-// Test-only hooks, active ONLY when KHATAOS_TEST_HOOKS=1 / KHATAOS_TEST_TENANT=1.
-// They let the E2E suite create data inside the server's own process, which is
-// required for the single-process pglite engine. Never enabled in production.
+// Test-only hooks (Fastify plugin), active ONLY when KHATAOS_TEST_HOOKS=1 /
+// KHATAOS_TEST_TENANT=1. They let the E2E suite create data inside the
+// server's own process, which is required for the single-process pglite
+// engine. Never enabled in production.
 
 const { insert } = require('./db');
 const { hashPassword, uid, nowIso, todayStr } = require('./util');
-const { ok } = require('./router');
 
 async function bootstrapTestTenant() {
   const coId = 'co_smoke';
@@ -29,31 +29,31 @@ async function bootstrapTestTenant() {
   return coId;
 }
 
-function installTestHooks(router) {
+async function registerTestHooks(fastify) {
   // Statement-shaped bank transaction (like Decentro.pull would write).
-  router.post('/api/_test/bank-txn', async (req, res, p, user) => {
-    const b = req.body || {};
+  fastify.post('/api/_test/bank-txn', async (request, reply) => {
+    const b = request.body || {};
     await insert('bank_transactions', {
-      id: b.id || uid('btx'), company_id: user.company_id, account_id: b.account_id || 'acc_smoke',
+      id: b.id || uid('btx'), company_id: request.user.company_id, account_id: b.account_id || 'acc_smoke',
       external_id: b.external_id || 'EXT-' + Date.now(), txn_date: b.txn_date || todayStr(),
       amount: Number(b.amount) || 0, description: b.description || '', mode: b.mode || 'NEFT',
       ref_no: b.ref_no || null, status: 'posted', matched: 0, created_at: nowIso(),
     });
-    ok(res, { inserted: true });
+    reply.ok({ inserted: true });
   });
 
   // GSTR-2B snapshot (like a real GSP fetch would store).
-  router.post('/api/_test/gstr2b', async (req, res, p, user) => {
-    const b = req.body || {};
+  fastify.post('/api/_test/gstr2b', async (request, reply) => {
+    const b = request.body || {};
     const period = b.period || todayStr().slice(0, 7);
     await insert('gstr2b_snapshots', {
-      id: uid('g2b'), company_id: user.company_id, period, gstin: b.gstin || null,
+      id: uid('g2b'), company_id: request.user.company_id, period, gstin: b.gstin || null,
       total_itc: 0, itc_cgst: 0, itc_sgst: 0, itc_igst: 0,
       data_json: JSON.stringify(b.data_json || []), cdnr_json: JSON.stringify(b.cdnr_json || []),
       source: 'gstn-live', fetched_at: nowIso(),
     });
-    ok(res, { inserted: true, period });
+    reply.ok({ inserted: true, period });
   });
 }
 
-module.exports = { bootstrapTestTenant, installTestHooks };
+module.exports = { bootstrapTestTenant, registerTestHooks };
