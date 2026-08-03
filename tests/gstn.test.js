@@ -134,6 +134,25 @@ async function check(name, fn) {
     assert.strictEqual(out.source, 'gstn-simulated');
   });
 
+  await check('gstr2b: maps cdnr credit/debit note rows', () => {
+    const out = Gstn.mapGstr2b({
+      ...GSTR2B_FIXTURE,
+      cdnr: [
+        { ctin: '24ACRPP7935N1ZO', docno: 'CN-2024-1', docdt: '04-12-2024', txval: 20000, cgst: 1800, sgst: 1800, igst: 0, typ: 'C' },
+        { ctin: '24ACRPP7935N1ZO', docno: 'DN-2024-2', docdt: '06-12-2024', txval: '10,000.00', cgst: '900.00', sgst: '900.00', igst: '0', typ: 'D' },
+      ],
+    }, { period: '122024' });
+    assert.strictEqual(out.cdnr.length, 2);
+    assert.strictEqual(out.credit_notes, 2);
+    assert.strictEqual(out.cdnr[0].invoice_no, 'CN-2024-1');
+    assert.strictEqual(out.cdnr[0].gstin, '24ACRPP7935N1ZO');
+    assert.strictEqual(out.cdnr[0].taxable, 20000);
+    assert.strictEqual(out.cdnr[0].doc_type, 'C');
+    assert.strictEqual(out.cdnr[1].taxable, 10000); // comma-formatted normalized
+    assert.strictEqual(out.cdnr[1].doc_type, 'D');
+    assert.strictEqual(out.total_itc, 101925); // CDNR rows do not inflate ITC totals
+  });
+
   // ---- deterministic mock always produces mismatch conditions ----
   await check('gstr2b mock: first invoice missing, second at 88% -> mismatches', async () => {
     const coId = 'gstn-unit-' + Date.now();

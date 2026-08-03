@@ -58,6 +58,21 @@ function invoke(handler, params, user) {
     assert.strictEqual(out.data.total, 100000);
   });
 
+  await insert('tally_vouchers', {
+    id: uid('tv'), company_id: co, voucher_number: 'DN-1', voucher_type: 'Debit Note', date: '2026-02-01',
+    amount: 20000, party_name: 'Vendor A', entry_json: '[]', tally_guid: 'g-aging-3', tally_alterid: 1,
+    cancelled: 0, imported_at: nowIso(),
+  });
+
+  await check('payables aging: Debit Notes net against the same vendor purchase', async () => {
+    const router = createRouter();
+    const found = router.find('GET', '/api/payables/aging');
+    const out = await invoke(found.handler, found.params, { company_id: co, role: 'cfo' });
+    assert.strictEqual(out.data.items.length, 1);
+    assert.strictEqual(out.data.items[0].amount, 80000);
+    assert.strictEqual(out.data.total, 80000); // 100,000 purchase - 20,000 Debit Note
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });

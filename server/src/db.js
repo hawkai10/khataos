@@ -257,6 +257,7 @@ CREATE TABLE IF NOT EXISTS gstr2b_snapshots (
   itc_sgst REAL DEFAULT 0,
   itc_igst REAL DEFAULT 0,
   data_json TEXT DEFAULT '[]',
+  cdnr_json TEXT DEFAULT '[]',
   source TEXT DEFAULT 'gstr2b',
   fetched_at TEXT NOT NULL
 );
@@ -404,6 +405,7 @@ const MIGRATIONS = [
   'ALTER TABLE tally_vouchers ADD COLUMN tally_guid TEXT',
   'ALTER TABLE tally_vouchers ADD COLUMN tally_alterid INTEGER DEFAULT 0',
   'ALTER TABLE tally_vouchers ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE gstr2b_snapshots ADD COLUMN cdnr_json TEXT DEFAULT \'[]\'',
   'ALTER TABLE tally_ledgers ADD COLUMN tally_guid TEXT',
   'ALTER TABLE tally_ledgers ADD COLUMN tally_alterid INTEGER DEFAULT 0',
   'ALTER TABLE tally_groups ADD COLUMN tally_guid TEXT',

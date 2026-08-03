@@ -47,7 +47,10 @@ function findTallyMatch(txn, index) {
   const outflow = Number(txn.amount) < 0;
   const directionOk = (v) => {
     const t = String(v.voucher_type || '').toLowerCase();
-    return outflow ? ['payment', 'contra', 'journal', 'purchase'].includes(t) : ['receipt', 'sales', 'journal'].includes(t);
+    // Debit Note = purchase return: the supplier refund lands as a bank
+    // credit (inflow). Credit Note = sales return: the refund we pay the
+    // customer lands as a bank debit (outflow).
+    return outflow ? ['payment', 'contra', 'journal', 'purchase', 'credit note'].includes(t) : ['receipt', 'sales', 'journal', 'debit note'].includes(t);
   };
   const absAmt = Math.abs(Number(txn.amount) || 0);
   // Strong pass: BILLALLOCATIONS ref ties to a KhataOS invoice or payment.

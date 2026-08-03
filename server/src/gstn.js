@@ -188,13 +188,27 @@ function mapGstr2b(payload, opts = {}) {
     cess: inr(num(r.cess)),
     supplier_filed_on: r.supfildt || null,
   })).filter(r => r.invoice_no);
+  // GSTR-2B CDNR section: credit/debit notes issued by suppliers. Same row
+  // shape as b2b plus the GSTN document type (C = credit note, D = debit
+  // note) so scanMismatches can compare them against imported note vouchers.
+  const cdnr = (Array.isArray(payload.cdnr) ? payload.cdnr : []).map(r => ({
+    invoice_no: String(r.docno || r.doc_num || r.document_number || ''),
+    gstin: r.ctin || r.supplier_gstin || null,
+    taxable: inr(num(r.txval)),
+    cgst: inr(num(r.cgst)),
+    sgst: inr(num(r.sgst)),
+    igst: inr(num(r.igst)),
+    cess: inr(num(r.cess)),
+    doc_type: r.typ || r.doc_type || null,
+  })).filter(r => r.invoice_no);
   const itc = (k) => inr(invoices.reduce((s, r) => s + (r[k] || 0), 0));
   return {
     period, gstin,
     total_itc: inr(itc('cgst') + itc('sgst') + itc('igst')),
     itc_cgst: itc('cgst'), itc_sgst: itc('sgst'), itc_igst: itc('igst'),
     invoices,
-    credit_notes: Array.isArray(payload.cdnr) ? payload.cdnr.length : 0,
+    cdnr,
+    credit_notes: cdnr.length,
     source: mode() === 'live' ? 'gstn-live' : 'gstn-simulated',
     fetched_at: nowIso(),
   };

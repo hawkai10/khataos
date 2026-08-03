@@ -137,6 +137,41 @@ async function addVoucher(coId, number, type, amount, party, entries) {
     assert.strictEqual(stats.auto, 0);
   });
 
+  await check('bank credit reconciles against a Debit Note voucher', async () => {
+    const co = 'rc-dn-' + Date.now();
+    await setup(co, 'Sundry Creditors - Sai Traders');
+    await addTxn(co, 'txn-5', 20000, 'R5'); // positive = bank credit (refund)
+    await addVoucher(co, 'DN-1', 'Debit Note', 20000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: -20000, positive: true, bill_refs: [] },
+      { ledger: 'Purchase Return', amount: 20000, positive: false, bill_refs: [] },
+    ]);
+    const matched = await recon.autoVoucherMatch(co, 30);
+    const m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-5']);
+    assert.ok(m, 'expected a Debit Note match for the bank credit');
+    assert.strictEqual(m.tally_voucher_no, 'DN-1');
+    assert.strictEqual(m.match_type, 'fuzzy');
+    const txn = await get('SELECT matched FROM bank_transactions WHERE id = ?', ['txn-5']);
+    assert.strictEqual(txn.matched, 1);
+    assert.strictEqual(matched, 1);
+  });
+
+  await check('bank debit reconciles against a Credit Note voucher', async () => {
+    const co = 'rc-cn-' + Date.now();
+    await setup(co, 'Sundry Creditors - Sai Traders');
+    await addTxn(co, 'txn-6', -15000, 'R6'); // negative = bank debit (refund paid out)
+    await addVoucher(co, 'CN-1', 'Credit Note', 15000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sales Return', amount: -15000, positive: true, bill_refs: [] },
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 15000, positive: false, bill_refs: [] },
+    ]);
+    const stats = await recon.matchAll(co);
+    const m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-6']);
+    assert.ok(m, 'expected a Credit Note match for the bank debit');
+    assert.strictEqual(m.tally_voucher_no, 'CN-1');
+    const txn = await get('SELECT matched FROM bank_transactions WHERE id = ?', ['txn-6']);
+    assert.strictEqual(txn.matched, 1);
+    assert.ok(stats.auto >= 1);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error('FATAL:', e); process.exit(1); });
