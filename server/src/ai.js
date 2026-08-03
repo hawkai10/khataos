@@ -16,9 +16,12 @@
 // ============================================================================
 
 const { all, get } = require('./db');
-const { todayStr, daysAgo, daysAhead, inr, formatINR, minsSince } = require('./util');
+const { todayStr, daysAgo, inr, formatINR, minsSince } = require('./util');
 const recon = require('./recon');
 const { TallyConnector } = require('./adapters');
+const Cash = require('./services/cash');
+const Invoices = require('./services/invoices');
+const Gst = require('./services/gst');
 
 // ---- provider config ----
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || process.env.AI_API_KEY || '';
@@ -55,42 +58,20 @@ const SUGGEST_PROMPT = [
 // Data accessors (tenant-scoped)
 // ----------------------------------------------------------------------------
 async function cashPosition(coId) {
-  const accounts = await all('SELECT * FROM bank_accounts WHERE company_id = ?', [coId]);
-  let available = 0;
-  for (const a of accounts) {
-    const last = await get('SELECT closing_balance FROM cash_daily WHERE account_id = ? ORDER BY date DESC LIMIT 1', [a.id]);
-    available += last ? last.closing_balance : 0;
-  }
-  const uncleared = inr((await all(`SELECT COALESCE(SUM(amount),0) AS u FROM bank_transactions WHERE company_id = ? AND status='uncleared' AND amount > 0`, [coId]))[0].u);
-  const last_synced_at = (await get('SELECT MAX(last_synced_at) AS t FROM bank_accounts WHERE company_id = ?', [coId])).t;
-  return { available: inr(available), uncleared, accounts: accounts.length, last_synced_at };
+  const { accounts, available } = await Cash.availableCash(coId);
+  return { available, uncleared: await Cash.totalUncleared(coId), accounts, last_synced_at: await Cash.lastBankSync(coId) };
 }
 
 async function duePayments(coId) {
-  const rows = await all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id
-    WHERE i.company_id = ? AND i.status IN ('approved','scheduled','pending_approval') AND i.due_date >= ? AND i.due_date <= ?
-    ORDER BY i.due_date`, [coId, todayStr(), daysAhead(7)]);
-  const overdue = await all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id
-    WHERE i.company_id = ? AND i.status IN ('approved','scheduled') AND i.due_date < ? ORDER BY i.due_date`, [coId, todayStr()]);
-  return {
-    rows, overdue,
-    due_amount: inr(rows.reduce((s, i) => s + i.net_payable, 0)),
-    overdue_amount: inr(overdue.reduce((s, i) => s + i.net_payable, 0)),
-  };
+  return Invoices.dueAndOverdue(coId);
 }
 
 async function runwayCalc(coId) {
-  const cash = await cashPosition(coId);
-  const outflows = await all(`SELECT COALESCE(SUM(amount),0) AS s FROM bank_transactions WHERE company_id = ? AND amount < 0 AND txn_date >= ?`, [coId, daysAgo(89)]);
-  const burn = inr(Math.abs(outflows[0].s) / 3);
-  return { available: cash.available, monthly_burn: burn, runway_months: burn > 0 ? inr(cash.available / burn) : null };
+  return Cash.runway(coId);
 }
 
 async function gstPosition(coId) {
-  const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? ORDER BY period DESC LIMIT 1', [coId]);
-  const liability = inr((await all(`SELECT COALESCE(SUM(net_payable),0) AS s FROM invoices WHERE company_id = ? AND status IN ('approved','scheduled')`, [coId]))[0].s);
-  const mismatches = await all(`SELECT * FROM gst_mismatches WHERE company_id = ? AND status = 'open' ORDER BY period DESC`, [coId]);
-  return { itc: snap ? snap.total_itc : 0, period: snap ? snap.period : null, liability, mismatches };
+  return Gst.position(coId);
 }
 
 async function reconPosition(coId) {
@@ -118,9 +99,7 @@ async function spendBreakdown(coId) {
 }
 
 async function pendingApprovals(coId, role) {
-  return all(`SELECT a.*, i.invoice_no, i.gross_amount, v.name AS vendor_name FROM approvals a
-    JOIN invoices i ON i.id = a.invoice_id LEFT JOIN vendors v ON v.id = i.vendor_id
-    WHERE a.company_id = ? AND a.status = 'pending' AND a.required_role = ? ORDER BY i.due_date LIMIT 8`, [coId, role]);
+  return Invoices.pendingApprovals(coId, role);
 }
 
 // ---- token-efficient context snapshot (short keys, capped arrays, raw numbers) ----

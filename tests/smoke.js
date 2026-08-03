@@ -61,7 +61,7 @@ async function waitForServer(proc, ms = 20000) {
   const start = Date.now();
   while (Date.now() - start < ms) {
     try {
-      const r = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'cfo@smoke.in', password: 'test1234' }) });
+      const r = await fetch(BASE + '/api/gstn/config');
       if (r.ok) return;
     } catch { /* not up yet */ }
     if (proc.exitCode != null) throw new Error('server exited early: ' + (proc.output || []).join(''));

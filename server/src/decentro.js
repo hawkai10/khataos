@@ -19,37 +19,37 @@
 
 const { db, insert, get, all, run } = require('./db');
 const { uid, nowIso, todayStr, daysAgo, inr } = require('./util');
+const { env, hasAll } = require('./config');
 
-const BASE_URL = process.env.DECENTRO_BASE_URL || 'https://in.staging.decentro.tech';
-const CLIENT_ID = process.env.DECENTRO_CLIENT_ID || '';
-const CLIENT_SECRET = process.env.DECENTRO_CLIENT_SECRET || '';
-const MODULE_SECRET = process.env.DECENTRO_MODULE_SECRET || '';
-const PROVIDER_SECRET = process.env.DECENTRO_PROVIDER_SECRET || '';
-const CUSTOMER_ID = process.env.DECENTRO_CUSTOMER_ID || '';
+// Read at call time so credentials can be set/changed after require.
+const baseUrl = () => env('DECENTRO_BASE_URL', 'https://in.staging.decentro.tech').replace(/\/$/, '');
+const customerId = () => env('DECENTRO_CUSTOMER_ID');
 
 function enabled() {
-  return !!(CLIENT_ID && CLIENT_SECRET && MODULE_SECRET);
+  return hasAll('DECENTRO_CLIENT_ID', 'DECENTRO_CLIENT_SECRET', 'DECENTRO_MODULE_SECRET');
 }
 
 function config() {
+  const c = { client_id: env('DECENTRO_CLIENT_ID'), client_secret: env('DECENTRO_CLIENT_SECRET'), module_secret: env('DECENTRO_MODULE_SECRET') };
   return {
     provider: 'decentro-connected-banking',
     module: 'business_accounts',
-    base_url: BASE_URL,
+    base_url: baseUrl(),
     enabled: enabled(),
-    missing_env: enabled() ? [] : ['DECENTRO_CLIENT_ID', 'DECENTRO_CLIENT_SECRET', 'DECENTRO_MODULE_SECRET'].filter(k => !process.env[k]),
-    provider_secret_set: !!PROVIDER_SECRET,
-    production: !BASE_URL.includes('staging'),
+    missing_env: enabled() ? [] : ['DECENTRO_CLIENT_ID', 'DECENTRO_CLIENT_SECRET', 'DECENTRO_MODULE_SECRET'].filter((k) => !process.env[k]),
+    provider_secret_set: !!env('DECENTRO_PROVIDER_SECRET'),
+    production: !baseUrl().includes('staging'),
   };
 }
 
 function headers() {
+  const c = { client_id: env('DECENTRO_CLIENT_ID'), client_secret: env('DECENTRO_CLIENT_SECRET'), module_secret: env('DECENTRO_MODULE_SECRET'), provider_secret: env('DECENTRO_PROVIDER_SECRET') };
   return {
     'content-type': 'application/json',
-    'client_id': CLIENT_ID,
-    'client_secret': CLIENT_SECRET,
-    'module_secret': MODULE_SECRET,
-    ...(PROVIDER_SECRET ? { 'provider_secret': PROVIDER_SECRET } : {}),
+    'client_id': c.client_id,
+    'client_secret': c.client_secret,
+    'module_secret': c.module_secret,
+    ...(c.provider_secret ? { 'provider_secret': c.provider_secret } : {}),
   };
 }
 
@@ -61,7 +61,7 @@ async function request(path, { method = 'GET', body, allowFailure = false } = {}
   }
   let resp;
   try {
-    resp = await fetch(BASE_URL + path, {
+    resp = await fetch(baseUrl() + path, {
       method,
       headers: headers(),
       body: body ? JSON.stringify(body) : undefined,
@@ -126,7 +126,7 @@ async function createLink(accountNumber, payload) {
     kyc_verified: payload.kyc_verified != null ? payload.kyc_verified : 1,
     kyc_check_decentro: payload.kyc_check_decentro || 0,
     currency_code: 'INR',
-    customer_id: payload.customer_id || CUSTOMER_ID,
+    customer_id: payload.customer_id || customerId(),
     ifsc: payload.ifsc || '',
     integration_type: 'CONNECTED_BANKING',
     provider_params: payload.provider_params || {},

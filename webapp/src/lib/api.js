@@ -1,4 +1,3 @@
-let token = localStorage.getItem('khataos_token') || '';
 let user = JSON.parse(localStorage.getItem('khataos_user') || 'null');
 let onUnauthorized = null;
 
@@ -7,7 +6,9 @@ export function setUnauthorizedHandler(fn) {
 }
 
 export function getToken() {
-  return token;
+  // Sessions are httpOnly cookies now; the header path is only for API
+  // clients. Nothing sensitive is stored in localStorage.
+  return '';
 }
 
 export function getUser() {
@@ -15,14 +16,12 @@ export function getUser() {
 }
 
 export function setSession(t, u) {
-  token = t;
   user = u;
-  localStorage.setItem('khataos_token', t);
+  localStorage.removeItem('khataos_token'); // migrate away from stored tokens
   localStorage.setItem('khataos_user', JSON.stringify(u));
 }
 
 export function clearSession() {
-  token = '';
   user = null;
   localStorage.removeItem('khataos_token');
   localStorage.removeItem('khataos_user');
@@ -30,7 +29,6 @@ export function clearSession() {
 
 export async function api(method, path, body) {
   const headers = { 'content-type': 'application/json' };
-  if (token) headers.authorization = 'Bearer ' + token;
   const resp = await fetch(path, {
     method,
     headers,
@@ -46,7 +44,7 @@ export async function api(method, path, body) {
     const msg = json && json.error ? json.error.message : `Request failed (${resp.status})`;
     const err = new Error(msg);
     err.status = resp.status;
-    if (resp.status === 401 && token) {
+    if (resp.status === 401) {
       clearSession();
       if (onUnauthorized) onUnauthorized();
     }
@@ -61,9 +59,7 @@ export const put = (path, body) => api('PUT', path, body);
 
 // Download an authenticated GET endpoint (e.g. CSV exports) as a file.
 export async function download(path, filename) {
-  const headers = {};
-  if (token) headers.authorization = 'Bearer ' + token;
-  const resp = await fetch(path, { headers });
+  const resp = await fetch(path);
   if (!resp.ok) {
     let msg = `Download failed (${resp.status})`;
     try {

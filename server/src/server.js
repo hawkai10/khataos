@@ -5,6 +5,7 @@ require('./env').loadEnv(); // load .env before any config is read
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { createRouter, ok } = require('./api');
 const { ApiError } = require('./auth');
 const { seedIfEmpty } = require('./seed');
@@ -18,6 +19,27 @@ const DOCS_ROOT = path.join(__dirname, '..', '..', 'docs');
 const HAS_FRONTEND = fs.existsSync(path.join(FRONTEND_DIST, 'index.html'));
 
 const router = createRouter();
+
+// ---- structured request log + in-memory rate limiter ----
+const RATE_WINDOW_MS = 15 * 60 * 1000;
+const RATE_LIMITS = new Map();
+
+function clientKey(req) {
+  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+}
+
+function rateLimited(req, bucket, limit) {
+  const key = bucket + ':' + clientKey(req);
+  const now = Date.now();
+  let entry = RATE_LIMITS.get(key);
+  if (!entry || entry.resetAt < now) {
+    entry = { count: 0, resetAt: now + RATE_WINDOW_MS };
+    RATE_LIMITS.set(key, entry);
+  }
+  entry.count += 1;
+  if (RATE_LIMITS.size > 10000) RATE_LIMITS.clear();
+  return entry.count > limit;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -76,13 +98,25 @@ function serveStatic(req, res, pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const startedAt = Date.now();
+  const requestId = crypto.randomBytes(4).toString('hex');
+  let authEmail = null;
+  res.on('finish', () => {
+    console.log(JSON.stringify({
+      ts: new Date().toISOString(), rid: requestId, method: req.method, path: new URL(req.url, 'http://x').pathname,
+      status: res.statusCode, ms: Date.now() - startedAt, user: authEmail || null,
+    }));
+  });
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
     if (url.pathname.startsWith('/api/')) {
+      if (url.pathname === '/api/auth/login' && rateLimited(req, 'login', 10)) throw new ApiError(429, 'Too many login attempts — try again later');
+      if (url.pathname.startsWith('/api/gstn/otp/') && rateLimited(req, 'otp', 5)) throw new ApiError(429, 'Too many OTP requests — try again later');
       const route = router.find(req.method, url.pathname);
       if (!route) throw new ApiError(404, `No route for ${req.method} ${url.pathname}`);
       if (['POST', 'PUT', 'PATCH'].includes(req.method)) req.body = await readBody(req);
       const user = await require('./auth').currentUser(req);
+      authEmail = user ? user.email : null;
       // Only a small allowlist of routes works without a session (login,
       // logout, integration status/config, provider webhooks). Everything
       // else must 401 cleanly instead of crashing in companyOf(null).

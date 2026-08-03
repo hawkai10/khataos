@@ -97,6 +97,25 @@ async function check(name, fn) {
     assert.strictEqual(status, 503);
   });
 
+  await check('config: credentials are read lazily, not at require time', () => {
+    process.env.GSTN_GSTIN = '29AABCA1234F1Z5';
+    process.env.GSTN_USERNAME = 'u';
+    process.env.GSTN_APP_KEY = 'k';
+    process.env.GSTN_CLIENT_ID = 'c';
+    process.env.GSTN_CLIENT_SECRET = 's';
+    try {
+      assert.strictEqual(Gstn.mode(), 'live');
+      assert.strictEqual(Gstn.config().enabled, true);
+    } finally {
+      delete process.env.GSTN_GSTIN;
+      delete process.env.GSTN_USERNAME;
+      delete process.env.GSTN_APP_KEY;
+      delete process.env.GSTN_CLIENT_ID;
+      delete process.env.GSTN_CLIENT_SECRET;
+    }
+    assert.strictEqual(Gstn.mode(), 'disabled');
+  });
+
   // ---- GSTR-2B mapping against the real fixture ----
   await check('gstr2b: maps b2b rows to snapshot rows', () => {
     const out = Gstn.mapGstr2b(GSTR2B_FIXTURE, { period: '122024', gstin: '29AABCA1234F1Z5' });

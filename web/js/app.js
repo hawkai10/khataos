@@ -24,11 +24,11 @@ const App = {
         this.showApp();
       } catch (err) { UI.toast(err.message, 'err'); }
     });
-    document.getElementById('logout-btn').addEventListener('click', () => {
-      API.logout();
+    document.getElementById('logout-btn').addEventListener('click', async () => {
+      await API.logout();
       this.showLogin();
     });
-    if (API.token && API.user) this.showApp(); else this.showLogin();
+    if (API.user) this.showApp(); else this.showLogin();
   },
 
   showLogin() { document.getElementById('app').classList.add('hidden'); document.getElementById('login-view').classList.remove('hidden'); },

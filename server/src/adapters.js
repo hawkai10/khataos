@@ -14,6 +14,7 @@ const { uid, nowIso, todayStr, daysAgo, addDays, inr } = require('./util');
 const Gstn = require('./gstn');
 const Tally = require('./tally');
 const TallyMapping = require('./tally-mapping');
+const { env, hasAll } = require('./config');
 
 function hashCode(str) {
   let h = 0;
@@ -78,25 +79,26 @@ function notConfigured(name) {
 // TODO(real-aa): implement the Sahamati AA / direct-bank consent + statement
 // APIs here. Until credentials exist (AA_CLIENT_ID/AA_CLIENT_SECRET or the
 // bank's direct API keys), every call is refused so no fake data can enter.
-const AA_ENABLED = !!(process.env.AA_CLIENT_ID && process.env.AA_CLIENT_SECRET);
+// Read at call time (lazy config).
+const aaEnabled = () => hasAll('AA_CLIENT_ID', 'AA_CLIENT_SECRET');
 
 const BankDataProvider = {
   name: 'aa-sahamati',
 
   startConsent(companyId, bankCode, accountNumber) {
-    if (!AA_ENABLED) throw notConfigured('Account Aggregator (AA)');
+    if (!aaEnabled()) throw notConfigured('Account Aggregator (AA)');
     // TODO(real-aa): POST to the FIU -> AA consent request API.
     throw notConfigured('Account Aggregator (AA)');
   },
 
   verifyConsent(consentId, otp) {
-    if (!AA_ENABLED) throw notConfigured('Account Aggregator (AA)');
+    if (!aaEnabled()) throw notConfigured('Account Aggregator (AA)');
     // TODO(real-aa): poll the AA consent status / verify the OTP flow.
     throw notConfigured('Account Aggregator (AA)');
   },
 
   async fetchTransactions(companyId, account, opts = {}) {
-    if (!AA_ENABLED) throw notConfigured('Account Aggregator (AA)');
+    if (!aaEnabled()) throw notConfigured('Account Aggregator (AA)');
     // TODO(real-aa): fetch balance + statement and persist bank_transactions /
     // cash_daily exactly like Decentro.pull does.
     throw notConfigured('Account Aggregator (AA)');
@@ -117,14 +119,14 @@ const BankDataProvider = {
 // payment to completed (and marks its invoices paid) WITHOUT generating any
 // fabricated gateway/UTR/bank data — it never invents transaction references
 // or amounts.
-const PAYMENT_GATEWAY_ENABLED = !!(process.env.RAZORPAYX_KEY_ID && process.env.RAZORPAYX_KEY_SECRET);
-const TEST_GATEWAY = process.env.PAYMENT_GATEWAY === 'test';
+const gatewayEnabled = () => hasAll('RAZORPAYX_KEY_ID', 'RAZORPAYX_KEY_SECRET');
+const testGateway = () => env('PAYMENT_GATEWAY') === 'test';
 
 const PaymentGateway = {
   name: 'razorpayx',
 
   async createBatch(companyId, payments) {
-    if (!PAYMENT_GATEWAY_ENABLED && !TEST_GATEWAY) throw notConfigured('Payment gateway (RazorpayX)');
+    if (!gatewayEnabled() && !testGateway()) throw notConfigured('Payment gateway (RazorpayX)');
     for (const p of payments) {
       const delay = p.type === 'instant' ? 600 : (p.scheduled_date && p.scheduled_date > todayStr()) ? 8000 : 2500;
       await queue.enqueue(companyId, 'gateway.execute', { paymentId: p.id }, { delayMs: delay });
@@ -137,7 +139,7 @@ const PaymentGateway = {
     if (!p) throw new Error('payment not found');
     await update('payments', paymentId, { status: 'processing', processed_at: nowIso() });
 
-    if (TEST_GATEWAY) {
+    if (testGateway()) {
       // CI double: complete the payment and mark invoices paid. No UTR, no
       // reference changes, no fabricated bank transaction.
       await update('payments', paymentId, { status: 'completed', processed_at: nowIso() });
@@ -150,7 +152,7 @@ const PaymentGateway = {
       return { status: 'completed' };
     }
 
-    if (!PAYMENT_GATEWAY_ENABLED) throw notConfigured('Payment gateway (RazorpayX)');
+    if (!gatewayEnabled()) throw notConfigured('Payment gateway (RazorpayX)');
     // TODO(real-gateway): call the RazorpayX Payout Batch API and persist the
     // real transaction id / UTR returned by the provider.
     throw notConfigured('Payment gateway (RazorpayX)');

@@ -20,24 +20,25 @@
 // ============================================================================
 
 const { todayStr, inr, nowIso } = require('./util');
+const { env, hasAll } = require('./config');
 
-const BASE_URL = (process.env.GSTN_GSP_BASE_URL || 'https://api.setu.co/gstn').replace(/\/$/, '');
-const EINV_BASE = (process.env.GSTN_EINVOICE_BASE_URL || 'https://einvoice1.gst.gov.in').replace(/\/$/, '');
-const AUTH_PATH = process.env.GSTN_AUTH_PATH || '/gus/taxpayerapi/v1.0/authenticate';
-const OTP_PATH = process.env.GSTN_OTP_PATH || '/gus/taxpayerapi/v1.0/otp/request';
-const GSTR2B_PATH = process.env.GSTN_GSTR2B_PATH || '/taxpayerapi/v2.0/gstr2b';
+// Read at call time so credentials can be set/changed after require.
+const baseUrl = () => env('GSTN_GSP_BASE_URL', 'https://api.setu.co/gstn').replace(/\/$/, '');
+const einvBase = () => env('GSTN_EINVOICE_BASE_URL', 'https://einvoice1.gst.gov.in').replace(/\/$/, '');
+const authPath = () => env('GSTN_AUTH_PATH', '/gus/taxpayerapi/v1.0/authenticate');
+const otpPath = () => env('GSTN_OTP_PATH', '/gus/taxpayerapi/v1.0/otp/request');
+const gstr2bPath = () => env('GSTN_GSTR2B_PATH', '/taxpayerapi/v2.0/gstr2b');
+const cfg = () => ({
+  gstin: env('GSTN_GSTIN'),
+  username: env('GSTN_USERNAME'),
+  app_key: env('GSTN_APP_KEY'),
+  client_id: env('GSTN_CLIENT_ID'),
+  client_secret: env('GSTN_CLIENT_SECRET'),
+  ip_usr: env('GSTN_IP_USR', '127.0.0.1'),
+});
 
-const CFG = {
-  gstin: process.env.GSTN_GSTIN || '',
-  username: process.env.GSTN_USERNAME || '',
-  app_key: process.env.GSTN_APP_KEY || '',
-  client_id: process.env.GSTN_CLIENT_ID || '',
-  client_secret: process.env.GSTN_CLIENT_SECRET || '',
-  ip_usr: process.env.GSTN_IP_USR || '127.0.0.1',
-};
-
-const stateCd = () => (CFG.gstin || '00').slice(0, 2);
-const hasCreds = () => !!(CFG.gstin && CFG.username && CFG.app_key && CFG.client_id && CFG.client_secret);
+const stateCd = () => (cfg().gstin || '00').slice(0, 2);
+const hasCreds = () => hasAll('GSTN_GSTIN', 'GSTN_USERNAME', 'GSTN_APP_KEY', 'GSTN_CLIENT_ID', 'GSTN_CLIENT_SECRET');
 const mode = () => (hasCreds() ? 'live' : 'disabled');
 
 function notConfigured() {
@@ -48,14 +49,15 @@ function notConfigured() {
 
 function config() {
   const missing = ['GSTN_GSTIN', 'GSTN_USERNAME', 'GSTN_APP_KEY', 'GSTN_CLIENT_ID', 'GSTN_CLIENT_SECRET'].filter(k => !process.env[k]);
+  const c = cfg();
   return {
     provider: 'gstn-via-gsp',
     mode: mode(),
-    base_url: BASE_URL,
-    einvoice_base_url: EINV_BASE,
-    gstin: CFG.gstin || null,
-    auth_endpoint: AUTH_PATH,
-    gstr2b_endpoint: GSTR2B_PATH + '/{gstin}',
+    base_url: baseUrl(),
+    einvoice_base_url: einvBase(),
+    gstin: c.gstin || null,
+    auth_endpoint: authPath(),
+    gstr2b_endpoint: gstr2bPath() + '/{gstin}',
     token_valid_minutes: 360,
     enabled: mode() === 'live',
     missing_env: mode() === 'live' ? [] : missing,
@@ -67,25 +69,25 @@ let auth = { token: null, expiresAt: 0, otpRef: null };
 
 async function requestOtp() {
   if (!hasCreds()) throw notConfigured();
-  const resp = await fetch(BASE_URL + OTP_PATH, {
+  const resp = await fetch(baseUrl() + otpPath(), {
     method: 'POST',
     headers: gspHeaders(),
-    body: JSON.stringify({ action: 'OTPREQUEST', username: CFG.username, app_key: CFG.app_key }),
+    body: JSON.stringify({ action: 'OTPREQUEST', username: cfg().username, app_key: cfg().app_key }),
   });
   const json = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(`GSTN OTP request failed (${resp.status}): ${json.message || json.error || resp.statusText}`);
   auth.otpRef = json.otp_ref || json.otpRef || 'OTP-' + Date.now();
-  return { status: 'OTP_REQUESTED', otp_ref: auth.otpRef, gstin: CFG.gstin, mode: 'live' };
+  return { status: 'OTP_REQUESTED', otp_ref: auth.otpRef, gstin: cfg().gstin, mode: 'live' };
 }
 
 async function validateOtp(otp) {
   const code = String(otp || '').trim();
   if (!hasCreds()) throw notConfigured();
   if (!auth.otpRef) throw Object.assign(new Error('Request an OTP first (POST /api/gstn/otp/request)'), { status: 400 });
-  const resp = await fetch(BASE_URL + AUTH_PATH, {
+  const resp = await fetch(baseUrl() + authPath(), {
     method: 'POST',
     headers: gspHeaders(),
-    body: JSON.stringify({ action: 'AUTHTOKEN', username: CFG.username, app_key: CFG.app_key, otp: code }),
+    body: JSON.stringify({ action: 'AUTHTOKEN', username: cfg().username, app_key: cfg().app_key, otp: code }),
   });
   const json = await resp.json().catch(() => ({}));
   if (!resp.ok || !json.auth_token) throw new Error(`GSTN authentication failed (${resp.status}): ${json.message || json.error || resp.statusText}`);
@@ -100,12 +102,13 @@ function mask(token) {
 }
 
 function gspHeaders(extra = {}) {
+  const c = cfg();
   return {
     'content-type': 'application/json',
-    'clientid': CFG.client_id,
-    'client-secret': CFG.client_secret,
+    'clientid': c.client_id,
+    'client-secret': c.client_secret,
     'state-cd': stateCd(),
-    'ip-usr': CFG.ip_usr,
+    'ip-usr': c.ip_usr,
     'txn': 'TXN-' + Date.now(),
     ...(auth.token ? { 'auth-token': auth.token } : {}),
     ...extra,
@@ -125,7 +128,7 @@ function requireAuth() {
 async function fetchGstr2bRaw(companyId, period, gstin) {
   if (!hasCreds()) throw notConfigured();
   requireAuth();
-  const resp = await fetch(`${BASE_URL}${GSTR2B_PATH}/${encodeURIComponent(gstin)}?fp=${period}`, {
+  const resp = await fetch(`${baseUrl()}${gstr2bPath()}/${encodeURIComponent(gstin)}?fp=${period}`, {
     method: 'GET',
     headers: gspHeaders(),
   });
@@ -185,7 +188,7 @@ function mapGstr2b(payload, opts = {}) {
 
 // ---- e-invoice (IRP) contract stub ----
 function buildEinvoiceBody(inv, opts = {}) {
-  const seller = opts.seller || { gstin: CFG.gstin, name: 'Seller Company Pvt Ltd', addr: 'Bengaluru, Karnataka 560001' };
+  const seller = opts.seller || { gstin: cfg().gstin, name: 'Seller Company Pvt Ltd', addr: 'Bengaluru, Karnataka 560001' };
   const buyer = opts.buyer || { gstin: inv.gstin_vendor || '', name: inv.vendor_name || 'Buyer', addr: '' };
   const items = Array.isArray(inv.lines) && inv.lines.length ? inv.lines : [{ hsn: '9988', description: 'Goods & services', qty: 1, rate: inv.taxable_amount || 0, taxable: inv.taxable_amount || 0, cgst: inv.cgst || 0, sgst: inv.sgst || 0, igst: inv.igst || 0 }];
   return {
@@ -212,12 +215,13 @@ async function generateIrn(invoice) {
   if (!hasCreds()) throw notConfigured();
   requireAuth();
   const body = buildEinvoiceBody(invoice);
-  const resp = await fetch(EINV_BASE + '/einv/v1.0/irn/generate', {
+  const c = cfg();
+  const resp = await fetch(einvBase() + '/einv/v1.0/irn/generate', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'gstin': CFG.gstin, 'client_id': CFG.client_id, 'client_secret': CFG.client_secret,
-      'user_name': CFG.username, 'txn': 'TXN-' + Date.now(),
+      'gstin': c.gstin, 'client_id': c.client_id, 'client_secret': c.client_secret,
+      'user_name': c.username, 'txn': 'TXN-' + Date.now(),
     },
     body: JSON.stringify(body),
   });

@@ -1,12 +1,10 @@
 'use strict';
 
 const API = {
-  token: localStorage.getItem('khataos_token') || '',
   user: JSON.parse(localStorage.getItem('khataos_user') || 'null'),
 
   async req(method, path, body) {
     const headers = { 'content-type': 'application/json' };
-    if (this.token) headers.authorization = 'Bearer ' + this.token;
     const resp = await fetch(path, {
       method,
       headers,
@@ -18,10 +16,10 @@ const API = {
       const msg = json && json.error ? json.error.message : `Request failed (${resp.status})`;
       const err = new Error(msg);
       err.status = resp.status;
-      if (resp.status === 401 && this.token) {
-        // Stale/invalid session (e.g. server DB reset) — clear it and let the
-        // app return to the login screen.
-        this.logout();
+      if (resp.status === 401) {
+        // Stale/invalid session — clear it and let the app return to login.
+        this.user = null;
+        localStorage.removeItem('khataos_user');
         document.dispatchEvent(new CustomEvent('khataos:unauthorized'));
       }
       throw err;
@@ -34,14 +32,13 @@ const API = {
 
   async login(email, password) {
     const data = await this.req('POST', '/api/auth/login', { email, password });
-    this.token = data.token;
     this.user = data.user;
-    localStorage.setItem('khataos_token', this.token);
+    localStorage.removeItem('khataos_token'); // sessions are httpOnly cookies now
     localStorage.setItem('khataos_user', JSON.stringify(this.user));
     return data.user;
   },
-  logout() {
-    this.token = '';
+  async logout() {
+    try { await this.req('POST', '/api/auth/logout', {}); } catch { /* cookie may already be gone */ }
     this.user = null;
     localStorage.removeItem('khataos_token');
     localStorage.removeItem('khataos_user');

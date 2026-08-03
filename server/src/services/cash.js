@@ -45,12 +45,24 @@ async function recentTransactions(coId, days, accountId = null) {
     : all(`SELECT t.*, a.account_name, b.name AS bank_name FROM bank_transactions t JOIN bank_accounts a ON a.id = t.account_id JOIN banks b ON b.code = a.bank_code WHERE t.company_id = ? AND t.txn_date >= ? ORDER BY t.txn_date DESC, t.id DESC LIMIT 200`, [coId, since]);
 }
 
-// Sum of each account's latest closing balance (used by the dashboard).
+// Sum of each account's latest closing balance in a single query (used by
+// the dashboard and the AI assistant) — no per-account N+1 lookups.
 async function availableCash(coId) {
-  const accounts = await all('SELECT * FROM bank_accounts WHERE company_id = ?', [coId]);
-  let available = 0;
-  for (const a of accounts) available += await closingBalance(a.id);
-  return { accounts, available: inr(available) };
+  const r = await get(`SELECT COUNT(*) AS c, COALESCE(SUM(balance), 0) AS total FROM (
+      SELECT ba.id,
+        (SELECT cd.closing_balance FROM cash_daily cd WHERE cd.account_id = ba.id ORDER BY cd.date DESC LIMIT 1) AS balance
+      FROM bank_accounts ba WHERE ba.company_id = ?
+    ) t`, [coId]);
+  return { accounts: r ? Number(r.c) : 0, available: inr(r ? Number(r.total) : 0) };
 }
 
-module.exports = { listBankAccounts, activeAccounts, closingBalance, accountUncleared, totalUncleared, lastBankSync, cashTrend, recentTransactions, availableCash };
+// Monthly burn from the last 90 days of outflows + runway in months. Shared by
+// the dashboard and the AI assistant so both see the same number.
+async function runway(coId) {
+  const { accounts, available } = await availableCash(coId);
+  const outflows = await get(`SELECT COALESCE(SUM(amount),0) AS s FROM bank_transactions WHERE company_id = ? AND amount < 0 AND txn_date >= ?`, [coId, daysAgo(89)]);
+  const monthlyBurn = inr(Math.abs(outflows.s) / 3);
+  return { available, accounts: accounts.length, monthly_burn: monthlyBurn, runway_months: monthlyBurn > 0 ? inr(available / monthlyBurn) : null };
+}
+
+module.exports = { listBankAccounts, activeAccounts, closingBalance, accountUncleared, totalUncleared, lastBankSync, cashTrend, recentTransactions, availableCash, runway };

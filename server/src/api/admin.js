@@ -5,8 +5,8 @@
 
 const { all, get, insert, run, update } = require('../db');
 const dbModule = require('../db');
-const { nowIso, todayStr, daysAgo, daysAhead, inr, formatINR } = require('../util');
-const { ApiError, login, logout, requireRole, audit, recentAudit, publicUser } = require('../auth');
+const { nowIso, todayStr, inr, formatINR } = require('../util');
+const { ApiError, login, logout, tokenFrom, requireRole, audit, recentAudit, publicUser, sessionCookie, clearSessionCookie } = require('../auth');
 const { TallyConnector } = require('../adapters');
 const Decentro = require('../decentro');
 const Gstn = require('../gstn');
@@ -15,6 +15,7 @@ const Assistant = require('../ai');
 const Cash = require('../services/cash');
 const Company = require('../services/company');
 const Gst = require('../services/gst');
+const Invoices = require('../services/invoices');
 const { bodyOf, requireNonEmptyString } = require('./validators');
 const { companyOf } = require('./helpers');
 
@@ -25,13 +26,15 @@ function register(r, deps) {
   r.post('/api/auth/login', async (req, res) => {
     const { email, password } = bodyOf(req);
     if (!email || !password) throw new ApiError(400, 'email and password required');
-    ok(res, await login(email, password));
+    const data = await login(email, password);
+    res.setHeader('Set-Cookie', sessionCookie(data.token));
+    ok(res, data);
   });
 
   r.post('/api/auth/logout', async (req, res) => {
-    const h = req.headers.authorization || '';
-    const token = h.startsWith('Bearer ') ? h.slice(7) : '';
+    const token = tokenFrom(req);
     if (token) await logout(token);
+    res.setHeader('Set-Cookie', clearSessionCookie());
     ok(res, { loggedOut: true });
   });
 
@@ -51,22 +54,16 @@ function register(r, deps) {
   // ===================== DASHBOARD =====================
   r.get('/api/dashboard', async (req, res, p, user) => {
     const coId = companyOf(user);
-    const { accounts, available } = await Cash.availableCash(coId);
+    const rw = await Cash.runway(coId);
+    const available = rw.available;
+    const accounts = rw.accounts;
+    const monthlyBurn = rw.monthly_burn;
+    const runwayMonths = rw.runway_months;
     const uncleared = await Cash.totalUncleared(coId);
-
-    const today = todayStr();
-    const due = await all(`SELECT * FROM invoices WHERE company_id = ? AND status IN ('approved','scheduled','pending_approval') AND due_date >= ? AND due_date <= ? ORDER BY due_date`, [coId, today, daysAhead(7)]);
-    const overdue = await all(`SELECT * FROM invoices WHERE company_id = ? AND status IN ('approved','scheduled') AND due_date < ? ORDER BY due_date`, [coId, today]);
-    const dueAmount = inr(due.reduce((s, i) => s + i.net_payable, 0));
-    const overdueAmount = inr(overdue.reduce((s, i) => s + i.net_payable, 0));
-
-    const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? ORDER BY period DESC LIMIT 1', [coId]);
-    const gstLiability = await Gst.netPayableSum(coId, ['approved', 'scheduled']);
-    const mismatches = (await get(`SELECT COUNT(*) AS c FROM gst_mismatches WHERE company_id = ? AND status = 'open'`, [coId])).c;
-
-    const outflows = await all(`SELECT COALESCE(SUM(amount),0) AS s FROM bank_transactions WHERE company_id = ? AND amount < 0 AND txn_date >= ?`, [coId, daysAgo(89)]);
-    const monthlyBurn = inr(Math.abs(outflows[0].s) / 3);
-    const runwayMonths = monthlyBurn > 0 ? inr(available / monthlyBurn) : null;
+    const { rows: due, overdue, due_amount: dueAmount, overdue_amount: overdueAmount } = await Invoices.dueAndOverdue(coId);
+    const g = await Gst.position(coId);
+    const gstLiability = g.liability;
+    const mismatches = g.mismatches.length;
 
     const reconScore = await recon.score(coId);
     const tally = await TallyConnector.health(coId);
@@ -74,9 +71,9 @@ function register(r, deps) {
     const lastBankSync = await Cash.lastBankSync(coId);
 
     ok(res, {
-      cash: { available, uncleared, accounts: accounts.length, runway_months: runwayMonths, monthly_burn: monthlyBurn, last_synced_at: lastBankSync },
+      cash: { available, uncleared, accounts, runway_months: runwayMonths, monthly_burn: monthlyBurn, last_synced_at: lastBankSync },
       payments: { due_this_week: { count: due.length, amount: dueAmount }, overdue: { count: overdue.length, amount: overdueAmount } },
-      gst: { itc: snap ? snap.total_itc : 0, liability: gstLiability, open_mismatches: mismatches, period: snap ? snap.period : null, fetched_at: snap ? snap.fetched_at : null },
+      gst: { itc: g.itc, liability: gstLiability, open_mismatches: mismatches, period: g.period, fetched_at: g.fetched_at },
       recon: { ...reconScore, as_of: lastBankSync },
       tally,
       trend,

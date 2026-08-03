@@ -5,6 +5,7 @@
 
 const { all, get, update } = require('../db');
 const { ApiError, audit } = require('../auth');
+const { todayStr, daysAhead, inr } = require('../util');
 
 async function getInvoiceDetail(coId, id) {
   const inv = await get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [id, coId]);
@@ -37,4 +38,25 @@ async function threeWayMatch(coId, invoiceId) {
   return result;
 }
 
-module.exports = { getInvoiceDetail, threeWayMatch };
+// Due-this-week + overdue invoices with vendor names and totals. Shared by the
+// dashboard and the AI assistant.
+async function dueAndOverdue(coId) {
+  const rows = await all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id
+    WHERE i.company_id = ? AND i.status IN ('approved','scheduled','pending_approval') AND i.due_date >= ? AND i.due_date <= ?
+    ORDER BY i.due_date`, [coId, todayStr(), daysAhead(7)]);
+  const overdue = await all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id
+    WHERE i.company_id = ? AND i.status IN ('approved','scheduled') AND i.due_date < ? ORDER BY i.due_date`, [coId, todayStr()]);
+  return {
+    rows, overdue,
+    due_amount: inr(rows.reduce((s, i) => s + i.net_payable, 0)),
+    overdue_amount: inr(overdue.reduce((s, i) => s + i.net_payable, 0)),
+  };
+}
+
+async function pendingApprovals(coId, role) {
+  return all(`SELECT a.*, i.invoice_no, i.gross_amount, v.name AS vendor_name FROM approvals a
+    JOIN invoices i ON i.id = a.invoice_id LEFT JOIN vendors v ON v.id = i.vendor_id
+    WHERE a.company_id = ? AND a.status = 'pending' AND a.required_role = ? ORDER BY i.due_date LIMIT 8`, [coId, role]);
+}
+
+module.exports = { getInvoiceDetail, threeWayMatch, dueAndOverdue, pendingApprovals };

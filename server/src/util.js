@@ -70,16 +70,22 @@ function shortRef(prefix, rng) {
   return `${prefix}${n}`;
 }
 
-// ---- crypto for demo passwords ----
+// ---- password hashing (scrypt, with legacy sha256:salt upgrade path) ----
 const crypto = require('crypto');
 function hashPassword(pw, salt) {
-  const s = salt || crypto.randomBytes(8).toString('hex');
-  const h = crypto.createHash('sha256').update(`${s}:${pw}`).digest('hex');
-  return `${s}$${h}`;
+  const s = salt || crypto.randomBytes(16).toString('hex');
+  const h = crypto.scryptSync(String(pw), s, 32).toString('hex');
+  return `scrypt$${s}$${h}`;
 }
 function verifyPassword(pw, stored) {
-  const [salt, hash] = String(stored).split('$');
-  return hashPassword(pw, salt) === stored;
+  const storedStr = String(stored || '');
+  const parts = storedStr.split('$');
+  if (parts[0] === 'scrypt') {
+    return hashPassword(pw, parts[1]) === storedStr;
+  }
+  // Legacy sha256:salt format — verified so old rows can be upgraded on login.
+  const [salt, hash] = parts;
+  return crypto.createHash('sha256').update(`${salt}:${pw}`).digest('hex') === hash;
 }
 
 module.exports = {

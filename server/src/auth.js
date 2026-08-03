@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { all, get, insert, run, update } = require('./db');
-const { nowIso, uid } = require('./util');
+const { nowIso, uid, hashPassword } = require('./util');
 
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
 
@@ -20,6 +20,10 @@ async function login(email, password) {
   if (!user) throw new ApiError(401, 'Invalid email or password');
   const { verifyPassword } = require('./util');
   if (!verifyPassword(password, user.password)) throw new ApiError(401, 'Invalid email or password');
+  // Upgrade legacy sha256:salt hashes to scrypt on first successful login.
+  if (!String(user.password || '').startsWith('scrypt$')) {
+    await run('UPDATE users SET password = ? WHERE id = ?', [hashPassword(password), user.id]);
+  }
   const token = crypto.randomBytes(24).toString('hex');
   await insert('sessions', {
     token, user_id: user.id, created_at: nowIso(),
@@ -39,13 +43,33 @@ async function logout(token) {
 }
 
 async function currentUser(req) {
-  const h = req.headers.authorization || '';
-  const token = h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-khataos-token'] || '');
+  const token = tokenFrom(req);
   if (!token) return null;
   const s = await get('SELECT * FROM sessions WHERE token = ? AND expires_at > ?', [token, nowIso()]);
   if (!s) return null;
   const user = await get('SELECT * FROM users WHERE id = ? AND active = 1', [s.user_id]);
   return user || null;
+}
+
+// Session token from the httpOnly cookie first, then the Authorization header
+// / x-khataos-token (API clients).
+function tokenFrom(req) {
+  const cookie = (req.headers.cookie || '').match(/(?:^|;\s*)khataos_session=([^;]+)/);
+  const cookieToken = cookie ? decodeURIComponent(cookie[1]) : null;
+  const h = req.headers.authorization || '';
+  return cookieToken || (h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-khataos-token'] || ''));
+}
+
+// HttpOnly session cookie for browser clients. SameSite=Strict + the JSON
+// content-type requirement give CSRF protection without extra tokens; API
+// clients keep using the Authorization header.
+function sessionCookie(token) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return `khataos_session=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${7 * 24 * 3600}${secure}`;
+}
+
+function clearSessionCookie() {
+  return 'khataos_session=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0';
 }
 
 async function requireAuth(req) {
@@ -75,4 +99,4 @@ async function recentAudit(companyId, limit = 50) {
   return all('SELECT * FROM audit_logs WHERE company_id = ? ORDER BY at DESC LIMIT ?', [companyId, limit]);
 }
 
-module.exports = { ApiError, ROLES, login, logout, currentUser, requireAuth, requireRole, publicUser, audit, recentAudit };
+module.exports = { ApiError, ROLES, login, logout, currentUser, tokenFrom, requireAuth, requireRole, publicUser, audit, recentAudit, sessionCookie, clearSessionCookie };

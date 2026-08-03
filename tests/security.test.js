@@ -1,0 +1,107 @@
+'use strict';
+
+// Tests for the security hardening:
+//   - passwords are hashed with scrypt; legacy sha256:salt hashes still verify
+//   - a successful login upgrades a legacy hash to scrypt
+//   - login issues an HttpOnly SameSite=Strict session cookie and logout
+//     clears it; currentUser accepts the cookie
+
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+const crypto = require('crypto');
+
+const TEST_DB = path.join(os.tmpdir(), 'khataos-data', 'security-unit-' + process.pid + '.db');
+process.env.KHATAOS_DB = TEST_DB;
+for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
+  try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
+}
+
+const assert = require('assert');
+const { insert, get } = require('../server/src/db');
+const { hashPassword, verifyPassword, nowIso } = require('../server/src/util');
+const { currentUser } = require('../server/src/auth');
+const { createRouter } = require('../server/src/api');
+
+let passed = 0, failed = 0;
+async function check(name, fn) {
+  try { await fn(); passed++; console.log('  PASS  ' + name); }
+  catch (e) { failed++; console.log('  FAIL  ' + name + ' - ' + e.message); }
+}
+
+function invoke(router, method, routePath, req) {
+  return new Promise((resolve, reject) => {
+    const found = router.find(method, routePath);
+    const res = {
+      headers: {},
+      setHeader(k, v) { this.headers[k] = v; },
+      writeHead() {},
+      end(body) { resolve({ headers: this.headers, body: body ? JSON.parse(body) : null }); },
+    };
+    found.handler({ url: routePath, headers: req.headers || {}, body: req.body || {} }, res, found.params, req.user || null).catch(reject);
+  });
+}
+
+(async () => {
+  const co = 'sec-' + Date.now();
+  await insert('companies', { id: co, name: 'Security Co', gstin: '29ABCDE1234F1Z5', created_at: nowIso() });
+  await insert('users', {
+    id: 'u-sec', company_id: co, name: 'Sec User', email: 'sec@test.in',
+    password: hashPassword('s3cret!'), role: 'cfo', department: 'Finance', active: 1, created_at: nowIso(),
+  });
+
+  await check('passwords: scrypt hash format round-trips', () => {
+    const h = hashPassword('s3cret!');
+    assert.ok(h.startsWith('scrypt$'), h);
+    assert.strictEqual(verifyPassword('s3cret!', h), true);
+    assert.strictEqual(verifyPassword('wrong', h), false);
+  });
+
+  await check('passwords: legacy sha256:salt hash still verifies', () => {
+    const salt = crypto.randomBytes(8).toString('hex');
+    const legacy = salt + '$' + crypto.createHash('sha256').update(`${salt}:legacy-pw`).digest('hex');
+    assert.strictEqual(verifyPassword('legacy-pw', legacy), true);
+    assert.strictEqual(verifyPassword('nope', legacy), false);
+  });
+
+  const router = createRouter();
+  await check('auth: login sets an HttpOnly SameSite=Strict cookie', async () => {
+    const out = await invoke(router, 'POST', '/api/auth/login', { body: { email: 'sec@test.in', password: 's3cret!' } });
+    const cookie = out.headers['Set-Cookie'];
+    assert.ok(cookie && cookie.startsWith('khataos_session='), cookie);
+    assert.ok(cookie.includes('HttpOnly'), cookie);
+    assert.ok(cookie.includes('SameSite=Strict'), cookie);
+    assert.ok(cookie.includes('Path=/'), cookie);
+  });
+
+  await check('auth: currentUser accepts the session cookie', async () => {
+    const out = await invoke(router, 'POST', '/api/auth/login', { body: { email: 'sec@test.in', password: 's3cret!' } });
+    const cookie = out.headers['Set-Cookie'].split(';')[0];
+    const user = await currentUser({ headers: { cookie } });
+    assert.ok(user && user.email === 'sec@test.in');
+  });
+
+  await check('auth: legacy hash is upgraded to scrypt on login', async () => {
+    const salt = crypto.randomBytes(8).toString('hex');
+    const legacy = salt + '$' + crypto.createHash('sha256').update(`${salt}:oldpw`).digest('hex');
+    await insert('users', {
+      id: 'u-legacy', company_id: co, name: 'Legacy User', email: 'legacy@test.in',
+      password: legacy, role: 'finance_manager', department: 'Finance', active: 1, created_at: nowIso(),
+    });
+    await invoke(router, 'POST', '/api/auth/login', { body: { email: 'legacy@test.in', password: 'oldpw' } });
+    const row = await get('SELECT password FROM users WHERE id = ?', ['u-legacy']);
+    assert.ok(row.password.startsWith('scrypt$'), row.password);
+  });
+
+  await check('auth: logout clears the session cookie', async () => {
+    const out = await invoke(router, 'POST', '/api/auth/login', { body: { email: 'sec@test.in', password: 's3cret!' } });
+    const cookie = out.headers['Set-Cookie'].split(';')[0];
+    const out2 = await invoke(router, 'POST', '/api/auth/logout', { headers: { cookie } });
+    assert.ok(out2.headers['Set-Cookie'].includes('Max-Age=0'), out2.headers['Set-Cookie']);
+    const user = await currentUser({ headers: { cookie } });
+    assert.strictEqual(user, null, 'cleared cookie must not authenticate');
+  });
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+})().catch((e) => { console.error('FATAL:', e); process.exit(1); });
