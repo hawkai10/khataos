@@ -1,7 +1,7 @@
 'use strict';
 
-// Accounts-payable domain: vendors, payables aging, invoice capture/approval
-// and the approval queue.
+// Accounts-payable domain (Fastify plugin): vendors, payables aging, invoice
+// capture/approval and the approval queue.
 
 const { all, get, insert, run, update } = require('../db');
 const { uid, nowIso, todayStr, addDays, inr } = require('../util');
@@ -12,23 +12,21 @@ const Invoices = require('../services/invoices');
 const { bodyOf } = require('./validators');
 const { companyOf, parseUrl, queryParam } = require('./helpers');
 
-function register(r, deps) {
-  const { ok } = deps;
-
-  r.get('/api/vendors', async (req, res, p, user) => {
-    ok(res, await all('SELECT * FROM vendors WHERE company_id = ? AND active = 1 ORDER BY name', [companyOf(user)]));
+async function register(fastify) {
+  fastify.get('/api/vendors', async (request, reply) => {
+    reply.ok(await all('SELECT * FROM vendors WHERE company_id = ? AND active = 1 ORDER BY name', [companyOf(request.user)]));
   });
 
   // Payables aging from imported Tally purchase vouchers (authoritative once
   // imported): age buckets by voucher date vs today. Netting lives in the
   // aging service; this handler is a thin wrapper.
-  r.get('/api/payables/aging', async (req, res, p, user) => {
-    ok(res, await Aging.payablesAging(companyOf(user)));
+  fastify.get('/api/payables/aging', async (request, reply) => {
+    reply.ok(await Aging.payablesAging(companyOf(request.user)));
   });
 
-  r.get('/api/invoices', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const u = parseUrl(req);
+  fastify.get('/api/invoices', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const u = parseUrl(request);
     const status = queryParam(u, 'status');
     const q = queryParam(u, 'q');
     const where = ['i.company_id = ?'];
@@ -36,22 +34,23 @@ function register(r, deps) {
     if (status && status !== 'all') { where.push('i.status = ?'); args.push(status); }
     if (q) { where.push('(i.invoice_no LIKE ? OR v.name LIKE ?)'); args.push('%' + q + '%', '%' + q + '%'); }
     const rows = await all(`SELECT i.*, v.name AS vendor_name, v.gstin AS vendor_gstin FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id WHERE ${where.join(' AND ')} ORDER BY i.created_at DESC LIMIT 200`, args);
-    ok(res, rows);
+    reply.ok(rows);
   });
 
-  r.get('/api/invoices/:id', async (req, res, p, user) => {
-    ok(res, await Invoices.getInvoiceDetail(companyOf(user), p.id));
+  fastify.get('/api/invoices/:id', async (request, reply) => {
+    reply.ok(await Invoices.getInvoiceDetail(companyOf(request.user), request.params.id));
   });
 
-  r.post('/api/invoices/ocr-preview', async (req, res, p, user) => {
-    const text = String((req.body || {}).text || '').trim();
+  fastify.post('/api/invoices/ocr-preview', async (request, reply) => {
+    const text = String((request.body || {}).text || '').trim();
     if (!text) throw new ApiError(400, 'text required');
-    ok(res, OcrEngine.extract(text));
+    reply.ok(OcrEngine.extract(text));
   });
 
-  r.post('/api/invoices/capture', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const b = bodyOf(req);
+  fastify.post('/api/invoices/capture', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
+    const b = bodyOf(request);
     const source = b.source || 'manual';
     let fields;
     if (source === 'pdf') {
@@ -100,49 +99,60 @@ function register(r, deps) {
     }
     await createApprovalChain(coId, invId);
     await audit(coId, user, 'invoice.captured', 'invoice', invId, { source, invoice_no: fields.invoice_no });
-    ok(res, await get('SELECT * FROM invoices WHERE id = ?', [invId]));
+    reply.ok(await get('SELECT * FROM invoices WHERE id = ?', [invId]));
   });
 
-  r.post('/api/invoices/:id/three-way-match', async (req, res, p, user) => {
-    ok(res, await Invoices.threeWayMatch(companyOf(user), p.id));
+  fastify.post('/api/invoices/:id/three-way-match', async (request, reply) => {
+    reply.ok(await Invoices.threeWayMatch(companyOf(request.user), request.params.id));
   });
 
-  r.post('/api/invoices/:id/approve', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const inv = await get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [p.id, coId]);
+  fastify.post('/api/invoices/:id/approve', {
+    schema: {
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', minLength: 1 } } },
+      body: {
+        type: 'object',
+        properties: { comment: { type: 'string' } },
+        additionalProperties: true,
+      },
+    },
+  }, async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
+    const inv = await get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!inv) throw new ApiError(404, 'invoice not found');
-    const pending = await get(`SELECT * FROM approvals WHERE invoice_id = ? AND status = 'pending' AND required_role = ? ORDER BY level LIMIT 1`, [p.id, user.role]);
+    const pending = await get(`SELECT * FROM approvals WHERE invoice_id = ? AND status = 'pending' AND required_role = ? ORDER BY level LIMIT 1`, [request.params.id, user.role]);
     if (!pending) {
-      const anyPending = await get(`SELECT COUNT(*) AS c FROM approvals WHERE invoice_id = ? AND status = 'pending'`, [p.id]);
-      if (anyPending.c > 0) throw new ApiError(403, `This approval level requires ${(await get(`SELECT required_role FROM approvals WHERE invoice_id = ? AND status='pending' ORDER BY level LIMIT 1`, [p.id]) || {}).required_role}`);
+      const anyPending = await get(`SELECT COUNT(*) AS c FROM approvals WHERE invoice_id = ? AND status = 'pending'`, [request.params.id]);
+      if (anyPending.c > 0) throw new ApiError(403, `This approval level requires ${(await get(`SELECT required_role FROM approvals WHERE invoice_id = ? AND status='pending' ORDER BY level LIMIT 1`, [request.params.id]) || {}).required_role}`);
       throw new ApiError(409, 'invoice already fully approved');
     }
-    await update('approvals', pending.id, { status: 'approved', approver_id: user.id, approver_name: user.name, comment: (req.body || {}).comment || null, decided_at: nowIso() });
-    const remaining = await get(`SELECT COUNT(*) AS c FROM approvals WHERE invoice_id = ? AND status = 'pending'`, [p.id]);
+    await update('approvals', pending.id, { status: 'approved', approver_id: user.id, approver_name: user.name, comment: (request.body || {}).comment || null, decided_at: nowIso() });
+    const remaining = await get(`SELECT COUNT(*) AS c FROM approvals WHERE invoice_id = ? AND status = 'pending'`, [request.params.id]);
     if (remaining.c === 0) {
-      await update('invoices', p.id, { status: 'approved', approved_by: user.id, approved_at: nowIso() });
-      queue.enqueue(coId, 'tally.syncVoucher', { invoiceId: p.id });
+      await update('invoices', request.params.id, { status: 'approved', approved_by: user.id, approved_at: nowIso() });
+      queue.enqueue(coId, 'tally.syncVoucher', { invoiceId: request.params.id });
     }
-    await audit(coId, user, 'invoice.approved', 'invoice', p.id, { invoice_no: inv.invoice_no, level: pending.level });
-    ok(res, await get('SELECT * FROM invoices WHERE id = ?', [p.id]));
+    await audit(coId, user, 'invoice.approved', 'invoice', request.params.id, { invoice_no: inv.invoice_no, level: pending.level });
+    reply.ok(await get('SELECT * FROM invoices WHERE id = ?', [request.params.id]));
   });
 
-  r.post('/api/invoices/:id/reject', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const inv = await get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [p.id, coId]);
+  fastify.post('/api/invoices/:id/reject', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
+    const inv = await get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!inv) throw new ApiError(404, 'invoice not found');
-    await update('invoices', p.id, { status: 'rejected' });
-    await run(`UPDATE approvals SET status='rejected', approver_id=?, approver_name=?, decided_at=? WHERE invoice_id=? AND status='pending'`, [user.id, user.name, nowIso(), p.id]);
-    await audit(coId, user, 'invoice.rejected', 'invoice', p.id, { invoice_no: inv.invoice_no, comment: (req.body || {}).comment });
-    ok(res, await get('SELECT * FROM invoices WHERE id = ?', [p.id]));
+    await update('invoices', request.params.id, { status: 'rejected' });
+    await run(`UPDATE approvals SET status='rejected', approver_id=?, approver_name=?, decided_at=? WHERE invoice_id=? AND status='pending'`, [user.id, user.name, nowIso(), request.params.id]);
+    await audit(coId, user, 'invoice.rejected', 'invoice', request.params.id, { invoice_no: inv.invoice_no, comment: (request.body || {}).comment });
+    reply.ok(await get('SELECT * FROM invoices WHERE id = ?', [request.params.id]));
   });
 
-  r.get('/api/approvals/pending', async (req, res, p, user) => {
+  fastify.get('/api/approvals/pending', async (request, reply) => {
     const rows = await all(`SELECT a.*, i.invoice_no, i.gross_amount, i.invoice_date, i.due_date, v.name AS vendor_name
       FROM approvals a JOIN invoices i ON i.id = a.invoice_id LEFT JOIN vendors v ON v.id = i.vendor_id
       WHERE a.company_id = ? AND a.status = 'pending' AND a.required_role = ?
-      ORDER BY i.due_date ASC`, [companyOf(user), user.role]);
-    ok(res, rows);
+      ORDER BY i.due_date ASC`, [companyOf(request.user), request.user.role]);
+    reply.ok(rows);
   });
 }
 
