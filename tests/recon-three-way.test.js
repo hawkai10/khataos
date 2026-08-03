@@ -20,6 +20,14 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
+// `node tests/recon-three-way.test.js --pg` runs on the in-process PostgreSQL
+// engine (pglite) instead of SQLite.
+if (process.argv.includes('--pg')) {
+  process.env.KHATAOS_DB_ENGINE = 'pglite';
+  delete process.env.KHATAOS_PGLITE_DIR;
+  console.log('DB engine: in-process PostgreSQL (pglite)');
+}
+
 const TEST_DB = path.join(os.tmpdir(), 'khataos-data', 'recon-three-way-' + process.pid + '.db');
 process.env.KHATAOS_DB = TEST_DB;
 for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {

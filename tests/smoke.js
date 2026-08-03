@@ -245,7 +245,7 @@ async function waitForServer(proc, ms = 20000) {
       '<TALLYMESSAGE><GROUP><NAME>Sundry Creditors</NAME><PARENT>Current Liabilities</PARENT></GROUP></TALLYMESSAGE>' +
       '<TALLYMESSAGE><LEDGER><NAME>Smoke Vendor Traders</NAME><PARENT>Sundry Creditors</PARENT></LEDGER></TALLYMESSAGE>' +
       '<TALLYMESSAGE><VOUCHER VCHTYPE="Payment" ACTION="Create"><GUID>g-smoke-1</GUID><ALTERID>' + alterid + '</ALTERID>' +
-      '<DATE>20260730</DATE><VOUCHERNUMBER>SMK-1</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>' +
+      '<DATE>' + today.replace(/-/g, '') + '</DATE><VOUCHERNUMBER>SMK-1</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>' +
       '<PARTYLEDGERNAME>Smoke Vendor Traders</PARTYLEDGERNAME>' +
       '<LEDGERENTRIES.LIST><LEDGERNAME>Rent Expenses</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-' + amount + '.00</AMOUNT></LEDGERENTRIES.LIST>' +
       '<LEDGERENTRIES.LIST><LEDGERNAME>Smoke Vendor Traders</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>' + amount + '.00</AMOUNT></LEDGERENTRIES.LIST>' +
@@ -258,7 +258,7 @@ async function waitForServer(proc, ms = 20000) {
     check('tally: same ALTERID re-upload skips', guid3.imported.vouchers.skipped === 1 && guid3.imported.vouchers.updated === 0, JSON.stringify(guid3.imported));
     const unbalXml = '<ENVELOPE><BODY><DATA>' +
       '<TALLYMESSAGE><LEDGER><NAME>Rent Expenses</NAME><PARENT>Current Liabilities</PARENT></LEDGER></TALLYMESSAGE>' +
-      '<TALLYMESSAGE><VOUCHER><DATE>20260730</DATE><VOUCHERNUMBER>SMK-UNBAL</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>' +
+      '<TALLYMESSAGE><VOUCHER><DATE>' + today.replace(/-/g, '') + '</DATE><VOUCHERNUMBER>SMK-UNBAL</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>' +
       '<PARTYLEDGERNAME>Smoke Vendor Traders</PARTYLEDGERNAME>' +
       '<LEDGERENTRIES.LIST><LEDGERNAME>Rent Expenses</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1000.00</AMOUNT></LEDGERENTRIES.LIST>' +
       '<LEDGERENTRIES.LIST><LEDGERNAME>Smoke Vendor Traders</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>900.00</AMOUNT></LEDGERENTRIES.LIST>' +
@@ -297,6 +297,17 @@ async function waitForServer(proc, ms = 20000) {
     const bundlePath = assetMatch ? assetMatch[1] : '/js/app.js';
     const appJs = await fetch(BASE + bundlePath);
     check('web: app bundle served', appJs.ok, bundlePath);
+
+    // ---- security: login rate limiting ----
+    let saw429 = false;
+    for (let i = 0; i < 12; i++) {
+      try {
+        await api('POST', '/api/auth/login', { email: 'nobody@smoke.in', password: 'wrong' });
+      } catch (e) {
+        if (e.status === 429) { saw429 = true; break; }
+      }
+    }
+    check('security: repeated failed logins are rate limited with 429', saw429);
 
     console.log(`\n${passed} passed, ${failed} failed`);
   } catch (err) {
