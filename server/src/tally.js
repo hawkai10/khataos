@@ -8,8 +8,8 @@
 // Vouchers from Tally as XML and uploads the file. This module is the parser
 // and voucher builders for that path (import pipeline: server/src/tally-import.js).
 //
-// Parser is deliberately tolerant of real Tally exports, which vary by
-// release and export type:
+// Raw XML -> object conversion is delegated to fast-xml-parser; this module
+// only re-implements the Tally normalization layer on top of that output:
 //   - voucher number:  <VOUCHERNUMBER> or <VCHNUM>
 //   - voucher date:    <DATE> or <VCHDATE> (YYYYMMDD or YYYY-MM-DD)
 //   - voucher type:    <VOUCHERTYPENAME> or the VCHTYPE attribute
@@ -26,40 +26,118 @@
 //                      from aging/recon/GST consumers (never from storage)
 //   - entries:         each entry also carries ISDEEMEDPOSITIVE (debit side)
 //                      and BILLALLOCATIONS.LIST references (Agst Ref)
-//   - entities:        &amp; etc. are decoded; BOM / missing <ENVELOPE>
-//                      wrappers are tolerated; attributes on tags ignored.
+//   - entities:        &amp; etc. are decoded by the parser; BOM / missing
+//                      <ENVELOPE> wrappers are tolerated; attributes kept.
+//
+// fast-xml-parser coverage notes (v5):
+//   - Tally uses mixed-case tags (<LEDGER>, <Ledger>, <VOUCHER>) — the parser
+//     preserves case, so every lookup here is case-insensitive (the old
+//     regex parser matched case-insensitively too).
+//   - Tag values are kept as raw strings (parseTagValue/parseAttributeValue
+//     false) so number normalization stays exactly where it was.
+//   - Repeated tags come back as arrays only when repeated; `asArray` coerces
+//     single nodes so the rest of the code can always iterate.
+//   - Malformed input makes the parser throw; parseExport swallows that and
+//     returns the empty structure, exactly like the old regex parser.
 // ============================================================================
 
-// ---- XML escaping + tiny parser (Tally's responses are predictable) ----
+const { XMLParser } = require('fast-xml-parser');
+
+// ---- XML escaping (builders only) ----
 const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const unesc = (v) => String(v ?? '').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
-// Inner content of every <TAG ...>...</TAG> block (attributes tolerated).
-function extractBlocks(xml, tag) {
-  const re = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'gi');
+// ---- raw XML -> object (fast-xml-parser) ----
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  parseTagValue: false,      // keep raw strings; num() owns number coercion
+  parseAttributeValue: false,
+  trimValues: true,
+});
+
+function parseXml(text) {
+  try {
+    const root = parser.parse(text);
+    return root && typeof root === 'object' ? root : {};
+  } catch {
+    return {}; // malformed fragments parse to nothing, never throw
+  }
+}
+
+// ---- normalization helpers over the parsed object tree ----
+
+function asArray(v) {
+  return v == null ? [] : Array.isArray(v) ? v : [v];
+}
+
+// Depth-first visit of every element node (attributes are skipped). Keeps
+// document order for repeated elements, mirroring the old regex scan.
+function walk(node, visit) {
+  if (Array.isArray(node)) {
+    for (const n of node) walk(n, visit);
+    return;
+  }
+  if (node && typeof node === 'object') {
+    for (const [key, value] of Object.entries(node)) {
+      if (key.startsWith('@_')) continue; // attribute keys, not elements
+      visit(key, value);
+      walk(value, visit);
+    }
+  }
+}
+
+// Every element named `tagName` anywhere in the tree (case-insensitive,
+// single occurrences coerced to arrays), in document order.
+function blocksOf(root, tagName) {
+  const upper = String(tagName).toUpperCase();
   const out = [];
-  let m;
-  while ((m = re.exec(xml))) out.push(m[1]);
+  walk(root, (key, value) => {
+    if (key.toUpperCase() !== upper) return;
+    for (const b of asArray(value)) if (b && typeof b === 'object') out.push(b);
+  });
   return out;
 }
 
-// Blocks plus the raw opening-tag attributes (for VCHTYPE etc.).
-function extractBlocksWithAttrs(xml, tag) {
-  const re = new RegExp(`<${tag}([^>]*)>([\\s\\S]*?)<\\/${tag}>`, 'gi');
-  const out = [];
-  let m;
-  while ((m = re.exec(xml))) out.push({ attrs: m[1] || '', inner: m[2] });
-  return out;
+function hasKey(node, name) {
+  if (node == null || typeof node !== 'object') return false;
+  const upper = String(name).toUpperCase();
+  return Object.keys(node).some((k) => !k.startsWith('@_') && k.toUpperCase() === upper);
 }
 
-function attr(attrs, name) {
-  const m = String(attrs || '').match(new RegExp(`${name}\\s*=\\s*["']([^"']*)["']`, 'i'));
-  return m ? unesc(m[1]) : null;
+// Text value of a direct child element (case-insensitive), or null.
+function valueOf(node, name) {
+  if (node == null || typeof node !== 'object') return null;
+  const upper = String(name).toUpperCase();
+  const key = Object.keys(node).find((k) => !k.startsWith('@_') && k.toUpperCase() === upper);
+  if (key == null) return null;
+  const v = node[key];
+  if (v == null) return null;
+  if (typeof v === 'object') {
+    if (Object.prototype.hasOwnProperty.call(v, '#text')) return String(v['#text']).trim();
+    return null; // nested element, not a text value
+  }
+  return String(v).trim();
 }
 
-function tag(xml, name) {
-  const m = xml.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${name}>`, 'i'));
-  return m ? unesc(m[1].trim()) : null;
+// Attribute value (case-insensitive), or null. Entities are already decoded
+// by fast-xml-parser.
+function attrOf(node, name) {
+  if (node == null || typeof node !== 'object') return null;
+  const upper = String(name).toUpperCase();
+  const key = Object.keys(node).find((k) => k.startsWith('@_') && k.slice(2).toUpperCase() === upper);
+  return key == null ? null : String(node[key]).trim();
+}
+
+// First text value of an element anywhere in the tree (document order).
+function firstValueOf(root, name) {
+  const upper = String(name).toUpperCase();
+  let found = null;
+  walk(root, (key, value) => {
+    if (found != null) return;
+    if (key.toUpperCase() !== upper) return;
+    if (value != null && typeof value !== 'object') found = String(value).trim();
+  });
+  return found;
 }
 
 // Parse a number safely: null when missing/empty/non-numeric, otherwise the
@@ -107,33 +185,31 @@ function voucherBalance(v) {
 //   1. nested:  <LEDGERENTRIES><LEDGERENTRY><LEDGERNAME>..</LEDGERNAME><AMOUNT>..</AMOUNT></LEDGERENTRY></LEDGERENTRIES>
 //   2. flat:    <LEDGERENTRIES.LIST><LEDGERNAME>..</LEDGERNAME><AMOUNT>..</AMOUNT></LEDGERENTRIES.LIST> (one per entry)
 //   3. stock:   <ALLINVENTORYENTRIES.LIST>..<ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>..</LEDGERNAME><AMOUNT>..</AMOUNT></ACCOUNTINGALLOCATIONS.LIST></ALLINVENTORYENTRIES.LIST>
-function extractEntries(inner) {
+function extractEntries(voucherNode) {
   const out = [];
   const parseEntry = (e) => {
-    const ledger = tag(e, 'LEDGERNAME');
+    const ledger = valueOf(e, 'LEDGERNAME');
     if (!ledger) return null;
-    const amount = num(tag(e, 'AMOUNT'));
-    const posRaw = tag(e, 'ISDEEMEDPOSITIVE');
+    const amount = num(valueOf(e, 'AMOUNT'));
+    const posRaw = valueOf(e, 'ISDEEMEDPOSITIVE');
     const positive = /^yes$/i.test(posRaw || '') ? true : /^no$/i.test(posRaw || '') ? false : null;
-    const billRefs = extractBlocks(e, 'BILLALLOCATIONS.LIST').map((b) => tag(b, 'NAME')).filter(Boolean);
+    const billRefs = blocksOf(e, 'BILLALLOCATIONS.LIST').map((b) => valueOf(b, 'NAME')).filter(Boolean);
     return { ledger, amount, positive, bill_refs: billRefs };
   };
-  for (const e of extractBlocks(inner, 'LEDGERENTRY')) {
+  for (const e of blocksOf(voucherNode, 'LEDGERENTRY')) {
     const entry = parseEntry(e);
     if (entry) out.push(entry);
   }
-  for (const e of extractBlocks(inner, 'LEDGERENTRIES.LIST')) {
+  for (const e of blocksOf(voucherNode, 'LEDGERENTRIES.LIST')) {
     // Skip flat lists that wrap nested LEDGERENTRY blocks (handled above) so
     // the same entry is never counted twice.
-    if (extractBlocks(e, 'LEDGERENTRY').length) continue;
+    if (hasKey(e, 'LEDGERENTRY')) continue;
     const entry = parseEntry(e);
     if (entry) out.push(entry);
   }
-  for (const inv of extractBlocks(inner, 'ALLINVENTORYENTRIES.LIST')) {
-    for (const a of extractBlocks(inv, 'ACCOUNTINGALLOCATIONS.LIST')) {
-      const entry = parseEntry(a);
-      if (entry) out.push(entry);
-    }
+  for (const a of blocksOf(voucherNode, 'ACCOUNTINGALLOCATIONS.LIST')) {
+    const entry = parseEntry(a);
+    if (entry) out.push(entry);
   }
   return out;
 }
@@ -143,60 +219,56 @@ function parseExport(xml) {
   const out = { company: null, groups: [], ledgers: [], vouchers: [] };
   const text = String(xml || '').replace(/^\uFEFF/, '').replace(/^\s*<\?xml[^>]*\?>\s*/, '');
   if (!text.trim()) return out;
+  const root = parseXml(text);
+  if (!Object.keys(root).length) return out;
 
-  const companyBlock = extractBlocks(text, 'COMPANY')[0];
-  if (companyBlock) out.company = tag(companyBlock, 'NAME');
+  const companyBlock = blocksOf(root, 'COMPANY')[0];
+  if (companyBlock) out.company = valueOf(companyBlock, 'NAME');
   // Voucher-only exports (Export Data -> Voucher Register) carry the company
   // in <STATICVARIABLES><SVCURRENTCOMPANY>...</SVCURRENTCOMPANY>.
-  if (!out.company) out.company = tag(text, 'SVCURRENTCOMPANY') || null;
+  if (!out.company) out.company = firstValueOf(root, 'SVCURRENTCOMPANY') || null;
 
-  for (const b of extractBlocks(text, 'GROUP')) {
-    const name = tag(b, 'NAME');
+  for (const b of blocksOf(root, 'GROUP')) {
+    const name = valueOf(b, 'NAME');
     if (!name) continue;
     out.groups.push({
       name,
-      parent: tag(b, 'PARENT') || null,
-      tally_guid: tag(b, 'GUID') || null,
-      tally_alterid: num(tag(b, 'ALTERID')) || 0,
+      parent: valueOf(b, 'PARENT') || null,
+      tally_guid: valueOf(b, 'GUID') || null,
+      tally_alterid: num(valueOf(b, 'ALTERID')) || 0,
     });
   }
 
-  for (const b of extractBlocks(text, 'LEDGER')) {
-    const name = tag(b, 'NAME') || tag(b, 'LEDGERNAME');
+  for (const b of blocksOf(root, 'LEDGER')) {
+    const name = valueOf(b, 'NAME') || valueOf(b, 'LEDGERNAME');
     if (!name) continue;
     out.ledgers.push({
       name,
-      group_name: tag(b, 'PARENT') || null,
-      opening_balance: num(tag(b, 'OPENINGBALANCE')) ?? 0,
-      gstin: tag(b, 'GSTIN') || null,
-      tally_guid: tag(b, 'GUID') || null,
-      tally_alterid: num(tag(b, 'ALTERID')) || 0,
+      group_name: valueOf(b, 'PARENT') || null,
+      opening_balance: num(valueOf(b, 'OPENINGBALANCE')) ?? 0,
+      gstin: valueOf(b, 'GSTIN') || null,
+      tally_guid: valueOf(b, 'GUID') || null,
+      tally_alterid: num(valueOf(b, 'ALTERID')) || 0,
     });
   }
 
-  for (const v of extractBlocksWithAttrs(text, 'VOUCHER')) {
-    const inner = v.inner;
-    // Strip the entries/inventory sections so voucher-level fields
-    // (VOUCHERNUMBER, DATE, AMOUNT, PARTYLEDGERNAME) are never confused with
-    // values nested inside them (e.g. the first entry's <AMOUNT>).
-    // Entries can be <LEDGERENTRIES> or <LEDGERENTRIES.LIST>; inventory
-    // vouchers also carry <ALLINVENTORYENTRIES.LIST> line-item amounts.
-    const clean = String(inner)
-      .replace(/<LEDGERENTRIES(?:\.[A-Z]+)?>[\s\S]*?<\/LEDGERENTRIES(?:\.[A-Z]+)?>/gi, '')
-      .replace(/<ALLINVENTORYENTRIES(?:\.[A-Z]+)?>[\s\S]*?<\/ALLINVENTORYENTRIES(?:\.[A-Z]+)?>/gi, '');
-    const party = tag(clean, 'PARTYLEDGERNAME') || tag(clean, 'PARTYNAME') || null;
-    const entries = extractEntries(inner);
-    const explicit = num(tag(clean, 'AMOUNT'));
+  for (const v of blocksOf(root, 'VOUCHER')) {
+    // Voucher-level fields are direct children of the VOUCHER node; entries
+    // live under LEDGERENTRIES / LEDGERENTRIES.LIST / ALLINVENTORYENTRIES.LIST,
+    // so they can never be confused with voucher-level values.
+    const party = valueOf(v, 'PARTYLEDGERNAME') || valueOf(v, 'PARTYNAME') || null;
+    const entries = extractEntries(v);
+    const explicit = num(valueOf(v, 'AMOUNT'));
     out.vouchers.push({
-      voucher_number: tag(clean, 'VOUCHERNUMBER') || tag(clean, 'VCHNUM') || null,
-      voucher_type: tag(clean, 'VOUCHERTYPENAME') || attr(v.attrs, 'VCHTYPE') || null,
-      date: normalizeTallyDate(tag(clean, 'DATE') || tag(clean, 'VCHDATE')),
+      voucher_number: valueOf(v, 'VOUCHERNUMBER') || valueOf(v, 'VCHNUM') || null,
+      voucher_type: valueOf(v, 'VOUCHERTYPENAME') || attrOf(v, 'VCHTYPE') || null,
+      date: normalizeTallyDate(valueOf(v, 'DATE') || valueOf(v, 'VCHDATE')),
       amount: explicit != null ? explicit : (entries.length ? deriveAmount(entries, party) : 0),
       party_name: party,
       entries,
-      tally_guid: tag(clean, 'GUID') || null,
-      tally_alterid: num(tag(clean, 'ALTERID')) || 0,
-      cancelled: /^yes$/i.test(tag(clean, 'ISCANCELLED') || ''),
+      tally_guid: valueOf(v, 'GUID') || null,
+      tally_alterid: num(valueOf(v, 'ALTERID')) || 0,
+      cancelled: /^yes$/i.test(valueOf(v, 'ISCANCELLED') || ''),
     });
   }
   return out;
@@ -258,5 +330,5 @@ function config() {
 
 module.exports = {
   config, parseExport, normalizeTallyDate, buildPurchaseVoucher, buildPaymentVoucher, voucherBalance,
-  _internals: { extractBlocks, extractBlocksWithAttrs, attr, tag, num, deriveAmount, extractEntries },
+  _internals: { asArray, blocksOf, hasKey, valueOf, attrOf, firstValueOf, num, deriveAmount, extractEntries, parseExport },
 };

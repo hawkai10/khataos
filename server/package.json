@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.2.0",
+    "fast-xml-parser": "^5.10.1",
     "pg": "^8.13.0"
   }
 }

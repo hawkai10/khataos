@@ -7,7 +7,8 @@
 
 const assert = require('assert');
 const Tally = require('../server/src/tally');
-const { extractBlocksWithAttrs, attr, tag, num, deriveAmount } = Tally._internals;
+const { blocksOf, valueOf, attrOf, num, deriveAmount } = Tally._internals;
+const { VOUCHER_EXPORT, OFFICIAL_SAMPLE, VOUCHER_ONLY_EXPORT, VOUCHER_VARIANT, RAW_VOUCHER, IDENTITY_EXPORT } = require('./fixtures/tally-xml');
 
 let passed = 0, failed = 0;
 function check(name, fn) {
@@ -22,20 +23,6 @@ check('config: cloud-upload only, always available', () => {
   assert.strictEqual(c.enabled, true);
 });
 
-// Typical Tally "Voucher Register" XML export (ENVELOPE wrapped).
-const VOUCHER_EXPORT = [
-  '<?xml version="1.0"?>',
-  '<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><DATA>',
-  '<TALLYMESSAGE><COMPANY><NAME>Acme Industries Pvt Ltd</NAME></COMPANY></TALLYMESSAGE>',
-  '<TALLYMESSAGE><VOUCHER VCHTYPE="Payment" ACTION="Create" OBJVIEW="Invoice Voucher View">',
-  '<DATE>20260730</DATE><VCHNUM>PV-1</VCHNUM><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>',
-  '<PARTYLEDGERNAME>Global Freight LLP</PARTYLEDGERNAME>',
-  '<LEDGERENTRIES><LEDGERENTRY><LEDGERNAME>Global Freight LLP</LEDGERNAME><AMOUNT>455000</AMOUNT></LEDGERENTRY>',
-  '<LEDGERENTRY><LEDGERNAME>Bank</LEDGERNAME><AMOUNT>-455000</AMOUNT></LEDGERENTRY></LEDGERENTRIES>',
-  '</VOUCHER></TALLYMESSAGE>',
-  '</DATA></BODY></ENVELOPE>',
-].join('');
-
 check('parse: real voucher export — VCHNUM, DATE, VCHTYPE attr, entries', () => {
   const d = Tally.parseExport(VOUCHER_EXPORT);
   assert.strictEqual(d.company, 'Acme Industries Pvt Ltd');
@@ -48,32 +35,6 @@ check('parse: real voucher export — VCHNUM, DATE, VCHTYPE attr, entries', () =
   assert.strictEqual(v.party_name, 'Global Freight LLP');
   assert.strictEqual(v.entries.length, 2);
 });
-
-// Mirror of Tally's official sample XML (help.tallysolutions.com/sample-xml/):
-// uppercase <GROUP>/<LEDGER> masters with NAME + PARENT, mixed-case
-// <Ledger NAME="..." Action="Alter"> with address fields, and a Payment
-// voucher using <PARTYNAME> with entries wrapped in <LEDGERENTRIES.LIST>.
-const OFFICIAL_SAMPLE = [
-  '<?xml version="1.0"?>',
-  '<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><DATA>',
-  '<TALLYMESSAGE><COMPANY><NAME>Acme Industries Pvt Ltd</NAME></COMPANY></TALLYMESSAGE>',
-  '<TALLYMESSAGE><GROUP Action="Create"><NAME>North Zone Debtors</NAME><PARENT>Sundry Debtors</PARENT></GROUP></TALLYMESSAGE>',
-  '<TALLYMESSAGE><LEDGER Action="Create"><NAME>Customer ABC</NAME><PARENT>North Zone Debtors</PARENT></LEDGER></TALLYMESSAGE>',
-  '<TALLYMESSAGE><Ledger NAME="Customer ABC" Action="Alter">',
-  '<MAILINGNAME.LIST TYPE="String"><MAILINGNAME>Customer - Mailing name</MAILINGNAME></MAILINGNAME.LIST>',
-  '<ADDRESS.LIST TYPE="String"><ADDRESS>Door No</ADDRESS><ADDRESS>Lane</ADDRESS></ADDRESS.LIST>',
-  '<PINCODE>560068</PINCODE><COUNTRYNAME>India</COUNTRYNAME><LEDSTATENAME>Karnataka</LEDSTATENAME>',
-  '<EMAIL>A@abc.com</EMAIL><EMAILCC>ACC@abc.com</EMAILCC>',
-  '<LEDGERPHONE>0888888</LEDGERPHONE><LEDGERMOBILE>99999999</LEDGERMOBILE>',
-  '</Ledger></TALLYMESSAGE>',
-  '<TALLYMESSAGE><VOUCHER VCHTYPE="Payment" ACTION="Create">',
-  '<DATE>20260730</DATE><VOUCHERNUMBER>PV-2</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>',
-  '<PARTYNAME>Customer ABC</PARTYNAME>',
-  '<LEDGERENTRIES.LIST><LEDGERENTRY><LEDGERNAME>Customer ABC</LEDGERNAME><AMOUNT>25000</AMOUNT></LEDGERENTRY>',
-  '<LEDGERENTRY><LEDGERNAME>Bank</LEDGERNAME><AMOUNT>-25000</AMOUNT></LEDGERENTRY></LEDGERENTRIES.LIST>',
-  '</VOUCHER></TALLYMESSAGE>',
-  '</DATA></BODY></ENVELOPE>',
-].join('');
 
 check('parse: official Tally sample XML — mixed-case tags, PARTYNAME, LEDGERENTRIES.LIST', () => {
   const d = Tally.parseExport(OFFICIAL_SAMPLE);
@@ -91,48 +52,6 @@ check('parse: official Tally sample XML — mixed-case tags, PARTYNAME, LEDGEREN
   assert.strictEqual(v.amount, 25000); // party entry read through <LEDGERENTRIES.LIST>
   assert.strictEqual(v.entries.length, 2);
 });
-
-// Faithful to Tally's Voucher Register export: flat <LEDGERENTRIES.LIST>
-// entries (one block per ledger), inventory <ACCOUNTINGALLOCATIONS.LIST>,
-// company carried in <STATICVARIABLES><SVCURRENTCOMPANY>, no masters.
-const VOUCHER_ONLY_EXPORT = [
-  '<?xml version="1.0"?>',
-  '<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST>',
-  '<STATICVARIABLES><SVCURRENTCOMPANY>Demo Traders Pvt Ltd</SVCURRENTCOMPANY></STATICVARIABLES></HEADER><BODY><DATA>',
-  '<TALLYMESSAGE><VOUCHER VCHTYPE="Sales" ACTION="Create"><DATE>20240401</DATE>',
-  '<VOUCHERNUMBER>SL/24-25/001</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>',
-  '<PARTYNAME>Sharma Enterprises</PARTYNAME><PARTYLEDGERNAME>Sharma Enterprises</PARTYLEDGERNAME>',
-  '<ALLINVENTORYENTRIES.LIST><STOCKITEMNAME>HP Laptop</STOCKITEMNAME><AMOUNT>104000.00</AMOUNT>',
-  '<ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>Sales Account</LEDGERNAME><AMOUNT>104000.00</AMOUNT></ACCOUNTINGALLOCATIONS.LIST>',
-  '</ALLINVENTORYENTRIES.LIST>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><AMOUNT>2812.50</AMOUNT></LEDGERENTRIES.LIST>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><AMOUNT>2812.50</AMOUNT></LEDGERENTRIES.LIST>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Sharma Enterprises</LEDGERNAME><AMOUNT>-116125.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '</VOUCHER></TALLYMESSAGE>',
-  '<TALLYMESSAGE><VOUCHER VCHTYPE="Payment" ACTION="Create"><DATE>20240405</DATE>',
-  '<VOUCHERNUMBER>PY/24-25/001</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>',
-  '<PARTYLEDGERNAME>HDFC Bank - Current A/c</PARTYLEDGERNAME>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Rent Expenses</LEDGERNAME><AMOUNT>-25000.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank - Current A/c</LEDGERNAME><AMOUNT>25000.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '</VOUCHER></TALLYMESSAGE>',
-  '<TALLYMESSAGE><VOUCHER VCHTYPE="Receipt" ACTION="Create"><DATE>20240408</DATE>',
-  '<VOUCHERNUMBER>RC/24-25/001</VOUCHERNUMBER><VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>',
-  '<PARTYLEDGERNAME>Sharma Enterprises</PARTYLEDGERNAME>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank - Current A/c</LEDGERNAME><AMOUNT>-75000.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Sharma Enterprises</LEDGERNAME><AMOUNT>75000.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '</VOUCHER></TALLYMESSAGE>',
-  '<TALLYMESSAGE><VOUCHER VCHTYPE="Journal" ACTION="Create"><DATE>20240410</DATE>',
-  '<VOUCHERNUMBER>JV/24-25/001</VOUCHERNUMBER><VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Depreciation</LEDGERNAME><AMOUNT>-3500.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Office Equipment</LEDGERNAME><AMOUNT>3500.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '</VOUCHER></TALLYMESSAGE>',
-  '<TALLYMESSAGE><VOUCHER VCHTYPE="Contra" ACTION="Create"><DATE>20240412</DATE>',
-  '<VOUCHERNUMBER>CN/24-25/001</VOUCHERNUMBER><VOUCHERTYPENAME>Contra</VOUCHERTYPENAME>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank - Current A/c</LEDGERNAME><AMOUNT>-40000.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '<LEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><AMOUNT>40000.00</AMOUNT></LEDGERENTRIES.LIST>',
-  '</VOUCHER></TALLYMESSAGE>',
-  '</DATA></BODY></ENVELOPE>',
-].join('');
 
 check('parse: voucher-register export — flat LEDGERENTRIES.LIST + inventory allocations', () => {
   const d = Tally.parseExport(VOUCHER_ONLY_EXPORT);
@@ -152,17 +71,6 @@ check('parse: voucher-register export — flat LEDGERENTRIES.LIST + inventory al
   assert.strictEqual(byNum['CN/24-25/001'].amount, 40000);
 });
 
-// Variant used by some releases: VCHDATE + no VOUCHERTYPENAME, type only on
-// the attribute, no voucher-level amount, party entry absent -> largest entry.
-const VOUCHER_VARIANT = [
-  '<VOUCHER VCHTYPE="Receipt">',
-  '<VCHDATE>2026-08-01</VCHDATE><VOUCHERNUMBER>RC-9</VOUCHERNUMBER>',
-  '<PARTYLEDGERNAME>Nexus Retail Pvt Ltd</PARTYLEDGERNAME>',
-  '<LEDGERENTRIES><LEDGERENTRY><LEDGERNAME>Cash</LEDGERNAME><AMOUNT>125000</AMOUNT></LEDGERENTRY>',
-  '<LEDGERENTRY><LEDGERNAME>Nexus Retail Pvt Ltd</LEDGERNAME><AMOUNT>-125000</AMOUNT></LEDGERENTRY></LEDGERENTRIES>',
-  '</VOUCHER>',
-].join('');
-
 check('parse: VCHDATE + attribute-only type + entries-derived amount', () => {
   const d = Tally.parseExport(VOUCHER_VARIANT);
   assert.strictEqual(d.vouchers.length, 1);
@@ -174,10 +82,36 @@ check('parse: VCHDATE + attribute-only type + entries-derived amount', () => {
 });
 
 check('parse: BOM, XML declaration and missing ENVELOPE are tolerated', () => {
-  const raw = '\uFEFF<?xml version="1.0"?><VOUCHER><DATE>20260701</DATE><VCHNUM>X-1</VCHNUM><AMOUNT>1000</AMOUNT></VOUCHER>';
-  const d = Tally.parseExport(raw);
+  const d = Tally.parseExport(RAW_VOUCHER);
   assert.strictEqual(d.vouchers.length, 1);
   assert.strictEqual(d.vouchers[0].amount, 1000); // explicit <AMOUNT> wins
+});
+
+check('parse: GUID, ALTERID and ISCANCELLED survive the new parser intact', () => {
+  const d = Tally.parseExport(IDENTITY_EXPORT);
+  assert.strictEqual(d.company, 'Acme Industries & Sons'); // entity decoded
+  assert.strictEqual(d.groups.length, 2);
+  const sc = d.groups.find((g) => g.name === 'Sundry Creditors');
+  assert.strictEqual(sc.parent, 'Current Liabilities');
+  assert.strictEqual(sc.tally_guid, 'g-sc');
+  assert.strictEqual(sc.tally_alterid, 1);
+  const ledger = d.ledgers.find((l) => l.name === 'Sai Traders & Co');
+  assert.strictEqual(ledger.gstin, '29AABCS7788K1Z4');
+  assert.strictEqual(ledger.tally_guid, 'g-led');
+  assert.strictEqual(ledger.tally_alterid, 3);
+  const v = d.vouchers[0];
+  assert.strictEqual(v.voucher_number, 'PU-1');
+  assert.strictEqual(v.voucher_type, 'Purchase');
+  assert.strictEqual(v.date, '2026-07-30');
+  assert.strictEqual(v.amount, 118000);
+  assert.strictEqual(v.tally_guid, 'g-vch');
+  assert.strictEqual(v.tally_alterid, 7);
+  assert.strictEqual(v.cancelled, true);
+  assert.strictEqual(v.entries.length, 3);
+  const partyEntry = v.entries.find((e) => e.ledger === 'Sai Traders & Co');
+  assert.deepStrictEqual(partyEntry.bill_refs, ['INV-ALPHA-1']);
+  assert.strictEqual(v.entries[0].positive, true);
+  assert.strictEqual(partyEntry.positive, false);
 });
 
 check('parse: ISCANCELLED Yes flags cancelled; absent stays false', () => {
@@ -203,9 +137,15 @@ check('parse: empty/garbage input never throws', () => {
   assert.strictEqual(Tally.parseExport('plain text').vouchers.length, 0);
 });
 
-check('helpers: attributes, tags and numbers', () => {
-  assert.strictEqual(attr('VCHTYPE="Payment" ACTION="Create"', 'VCHTYPE'), 'Payment');
-  assert.strictEqual(tag('<NAME>Sai Traders &amp; Co</NAME>', 'NAME'), 'Sai Traders & Co');
+check('helpers: parsed-object accessors and numbers', () => {
+  assert.strictEqual(attrOf({ '@_VCHTYPE': 'Payment', '@_ACTION': 'Create' }, 'VCHTYPE'), 'Payment');
+  assert.strictEqual(attrOf({ '@_VCHTYPE': 'Payment' }, 'vchtype'), 'Payment'); // case-insensitive
+  assert.strictEqual(valueOf({ NAME: 'Sai Traders & Co' }, 'NAME'), 'Sai Traders & Co');
+  assert.strictEqual(valueOf({ NAME: { '#text': ' padded ' } }, 'NAME'), 'padded');
+  assert.strictEqual(valueOf({ NAME: 'X' }, 'MISSING'), null);
+  assert.strictEqual(blocksOf({ LEDGER: [{ NAME: 'A' }, { NAME: 'B' }] }, 'LEDGER').length, 2);
+  assert.strictEqual(blocksOf({ LEDGER: { NAME: 'A' } }, 'LEDGER').length, 1); // single -> array
+  assert.strictEqual(blocksOf({ Ledger: { NAME: 'A' } }, 'LEDGER').length, 1); // mixed case
   assert.strictEqual(num('45,50,000.50'), 4550000.5);
   assert.strictEqual(num('not-a-number'), null);
   assert.strictEqual(num(null), null);
