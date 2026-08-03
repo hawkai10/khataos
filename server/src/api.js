@@ -22,7 +22,7 @@ const ALL_MODULES = { admin, cash, gst, invoices, payments, tally };
 // bridge excludes these; createRouter() without an explicit exclude still
 // returns every module so the in-process unit-test harness keeps working
 // during the transition.
-const CONVERTED = ['admin', 'cash', 'invoices'];
+const CONVERTED = ['admin', 'cash', 'invoices', 'payments'];
 
 function createRouter({ exclude = [] } = {}) {
   const r = new Router();

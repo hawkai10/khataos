@@ -1,7 +1,8 @@
 'use strict';
 
-// Payments & reconciliation domain: payment create/approve/execute/batch and
-// the bank-vs-payment/voucher reconciliation endpoints.
+// Payments & reconciliation domain (Fastify plugin): payment
+// create/approve/execute/batch and the bank-vs-payment/voucher reconciliation
+// endpoints.
 
 const { all, get, insert, run, update } = require('../db');
 const { uid, nowIso, daysAgo } = require('../util');
@@ -12,25 +13,39 @@ const PaymentService = require('../services/payments');
 const { bodyOf, requireOneOf } = require('./validators');
 const { companyOf } = require('./helpers');
 
-function register(r, deps) {
-  const { ok } = deps;
-
-  r.get('/api/payments', async (req, res, p, user) => {
-    const u = new URL(req.url, 'http://x');
+async function register(fastify) {
+  fastify.get('/api/payments', async (request, reply) => {
+    const u = new URL(request.url, 'http://x');
     const status = u.searchParams.get('status');
-    ok(res, await PaymentService.listPayments(companyOf(user), status));
+    reply.ok(await PaymentService.listPayments(companyOf(request.user), status));
   });
 
-  r.get('/api/payments/:id', async (req, res, p, user) => {
-    const row = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [p.id, companyOf(user)]);
+  fastify.get('/api/payments/:id', async (request, reply) => {
+    const row = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [request.params.id, companyOf(request.user)]);
     if (!row) throw new ApiError(404, 'payment not found');
-    ok(res, row);
+    reply.ok(row);
   });
 
-  r.post('/api/payments', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const b = bodyOf(req);
-    if (!b.vendor_id || !Array.isArray(b.invoice_ids) || !b.invoice_ids.length) throw new ApiError(400, 'vendor_id and invoice_ids required');
+  fastify.post('/api/payments', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['vendor_id', 'invoice_ids'],
+        properties: {
+          vendor_id: { type: 'string', minLength: 1 },
+          invoice_ids: { type: 'array', minItems: 1, items: { type: 'string' } },
+          mode: { type: 'string' },
+          type: { type: 'string' },
+          scheduled_date: { type: 'string' },
+          account_id: { type: 'string' },
+        },
+        additionalProperties: true,
+      },
+    },
+  }, async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
+    const b = bodyOf(request);
     const vendor = await get('SELECT * FROM vendors WHERE id = ? AND company_id = ?', [b.vendor_id, coId]);
     if (!vendor) throw new ApiError(404, 'vendor not found');
     const invoices = (await Promise.all(b.invoice_ids.map((id) => get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [id, coId])))).filter(Boolean);
@@ -49,36 +64,39 @@ function register(r, deps) {
       await PaymentGateway.createBatch(coId, [await get('SELECT * FROM payments WHERE id = ?', [row.id])]);
     }
     await audit(coId, user, 'payment.created', 'payment', row.id, { amount: amounts.amount, mode, needs_approval: needsApproval });
-    ok(res, row);
+    reply.ok(row);
   });
 
-  r.post('/api/payments/:id/approve', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const pay = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [p.id, coId]);
+  fastify.post('/api/payments/:id/approve', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
+    const pay = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!pay) throw new ApiError(404, 'payment not found');
     if (pay.status !== 'pending_approval') throw new ApiError(409, 'payment is not awaiting approval');
     const threshold = await PaymentService.approvalThreshold(coId);
     if (pay.amount > threshold) requireRole(user, ['cfo']);
-    await update('payments', p.id, { status: 'approved', approved_by: user.id });
+    await update('payments', request.params.id, { status: 'approved', approved_by: user.id });
     await PaymentGateway.createBatch(coId, [pay]);
-    await audit(coId, user, 'payment.approved', 'payment', p.id, { amount: pay.amount });
-    ok(res, await get('SELECT * FROM payments WHERE id = ?', [p.id]));
+    await audit(coId, user, 'payment.approved', 'payment', request.params.id, { amount: pay.amount });
+    reply.ok(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]));
   });
 
-  r.post('/api/payments/:id/execute', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const pay = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [p.id, coId]);
+  fastify.post('/api/payments/:id/execute', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
+    const pay = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!pay) throw new ApiError(404, 'payment not found');
     if (!['approved', 'pending_approval'].includes(pay.status)) throw new ApiError(409, 'payment cannot be executed from current state');
-    await update('payments', p.id, { type: 'instant', status: 'approved', approved_by: user.id });
-    await PaymentGateway.createBatch(coId, [await get('SELECT * FROM payments WHERE id = ?', [p.id])]);
-    await audit(coId, user, 'payment.executed', 'payment', p.id, { mode: pay.mode });
-    ok(res, await get('SELECT * FROM payments WHERE id = ?', [p.id]));
+    await update('payments', request.params.id, { type: 'instant', status: 'approved', approved_by: user.id });
+    await PaymentGateway.createBatch(coId, [await get('SELECT * FROM payments WHERE id = ?', [request.params.id])]);
+    await audit(coId, user, 'payment.executed', 'payment', request.params.id, { mode: pay.mode });
+    reply.ok(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]));
   });
 
-  r.post('/api/payments/batch', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const items = (req.body || {}).items || [];
+  fastify.post('/api/payments/batch', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const user = request.user;
+    const items = (request.body || {}).items || [];
     if (!items.length) throw new ApiError(400, 'items required');
     const created = [];
     for (const item of items) {
@@ -96,23 +114,23 @@ function register(r, deps) {
     const rows = await all(`SELECT * FROM payments WHERE id IN (${created.map(() => '?').join(',')})`, created);
     await PaymentGateway.createBatch(coId, rows);
     await audit(coId, user, 'payment.batch_created', 'payment', null, { count: created.length });
-    ok(res, rows);
+    reply.ok(rows);
   });
 
   // ===================== RECONCILIATION =====================
-  r.get('/api/recon/summary', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.get('/api/recon/summary', async (request, reply) => {
+    const coId = companyOf(request.user);
     const asOf = (await get('SELECT MAX(last_synced_at) AS t FROM bank_accounts WHERE company_id = ?', [coId])).t;
     const matches = await all(`SELECT rm.*, bt.amount AS bank_amount, bt.txn_date, bt.description, p.reference AS payment_ref
       FROM recon_matches rm
       JOIN bank_transactions bt ON bt.id = rm.bank_txn_id
       LEFT JOIN payments p ON p.id = rm.payment_id
       WHERE rm.company_id = ? ORDER BY rm.matched_at DESC LIMIT 50`, [coId]);
-    ok(res, { ...(await recon.score(coId)), as_of: asOf, recent: matches });
+    reply.ok({ ...(await recon.score(coId)), as_of: asOf, recent: matches });
   });
 
-  r.get('/api/recon/unmatched', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.get('/api/recon/unmatched', async (request, reply) => {
+    const coId = companyOf(request.user);
     const rows = await all(`SELECT t.*, a.account_name, b.name AS bank_name
       FROM bank_transactions t JOIN bank_accounts a ON a.id = t.account_id JOIN banks b ON b.code = a.bank_code
       WHERE t.company_id = ? AND t.matched = 0 AND t.status = 'posted' AND t.txn_date >= ?
@@ -126,32 +144,35 @@ function register(r, deps) {
     const mismatchRows = await all(`SELECT bank_txn_id, notes FROM recon_matches WHERE company_id = ? AND status = 'mismatch' ORDER BY matched_at DESC`, [coId]);
     const mismatchByTxn = new Map(mismatchRows.map((m) => [m.bank_txn_id, m.notes]));
     for (const t of rows) t.mismatch_note = mismatchByTxn.get(t.id) || null;
-    ok(res, rows);
+    reply.ok(rows);
   });
 
-  r.post('/api/recon/run', async (req, res, p, user) => {
+  fastify.post('/api/recon/run', async (request, reply) => {
+    const user = request.user;
     requireRole(user, ['cfo', 'finance_manager']);
     const stats = await recon.matchAll(companyOf(user));
     await audit(companyOf(user), user, 'recon.run', 'recon', null, stats);
-    ok(res, { ...stats, score: await recon.score(companyOf(user)) });
+    reply.ok({ ...stats, score: await recon.score(companyOf(user)) });
   });
 
-  r.post('/api/recon/manual-match', async (req, res, p, user) => {
+  fastify.post('/api/recon/manual-match', async (request, reply) => {
+    const user = request.user;
     requireRole(user, ['cfo', 'finance_manager']);
     const coId = companyOf(user);
-    const b = bodyOf(req);
+    const b = bodyOf(request);
     const txn = await get('SELECT * FROM bank_transactions WHERE id = ? AND company_id = ?', [b.bank_txn_id, coId]);
     if (!txn) throw new ApiError(404, 'transaction not found');
     const payment = b.payment_id ? await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [b.payment_id, coId]) : null;
     await recon.markMatched(txn.id, payment ? payment.id : null, 'manual', 1, user.id);
     await audit(coId, user, 'recon.manual_match', 'bank_transaction', txn.id, { payment_id: payment ? payment.id : null });
-    ok(res, { matched: true });
+    reply.ok({ matched: true });
   });
 
-  r.post('/api/recon/unmatched/:id/voucher', async (req, res, p, user) => {
+  fastify.post('/api/recon/unmatched/:id/voucher', async (request, reply) => {
+    const user = request.user;
     requireRole(user, ['cfo', 'finance_manager']);
     const coId = companyOf(user);
-    const txn = await get('SELECT * FROM bank_transactions WHERE id = ? AND company_id = ?', [p.id, coId]);
+    const txn = await get('SELECT * FROM bank_transactions WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!txn) throw new ApiError(404, 'transaction not found');
     const vno = 'PV-MAN-' + String(Date.now()).slice(-6);
     await insert('recon_matches', {
@@ -162,7 +183,7 @@ function register(r, deps) {
     await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [txn.id]);
     await TallyConnector.logSync(coId, 'voucher', vno, 'create', 'synced');
     await audit(coId, user, 'recon.voucher_created', 'bank_transaction', txn.id, { voucher: vno });
-    ok(res, { voucher_no: vno });
+    reply.ok({ voucher_no: vno });
   });
 }
 

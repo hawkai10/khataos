@@ -175,7 +175,9 @@ async function buildApp() {
 
   fastify.setErrorHandler((err, request, reply) => {
     if (reply.sent) return;
-    let status = err instanceof ApiError ? err.status : (Number.isInteger(err.status) ? err.status : 500);
+    let status = err instanceof ApiError
+      ? err.status
+      : (Number.isInteger(err.status) ? err.status : (Number.isInteger(err.statusCode) ? err.statusCode : 500));
     let message = err.message || 'Internal error';
     if (err && err.code === 'FST_ERR_CTP_BODY_TOO_LARGE') { status = 413; message = 'payload too large'; }
     if (status === 500) console.error('[error]', err);
