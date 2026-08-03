@@ -1,16 +1,18 @@
 'use strict';
 
 // ============================================================================
-// KhataOS Assistant — a Monday.com-style data-aware copilot.
+// KhataOS Copilot — data-grounded finance assistant.
 //
-// The assistant is grounded in the platform's own database: intent matching
-// resolves a question to live data (cash, due payments, runway, GST, recon,
-// Tally health, approvals, spend) and returns a natural-language answer plus
-// structured data for rich rendering and actionable suggestions.
+// Default: deterministic rule engine over the platform DB (works offline,
+// used by the E2E suite).
 //
-// When AI_PROVIDER_URL + AI_API_KEY are configured, the same retrieved
-// context is also sent to an OpenAI-compatible chat-completions endpoint for
-// a generative summary; the deterministic engine remains the offline default.
+// Generative: when DEEPSEEK_API_KEY is set (see .env.example), the same live
+// data is compacted into a token-efficient JSON snapshot and sent to DeepSeek
+// V4 Flash (OpenAI-compatible chat completions). Design follows the patterns
+// of NVIDIA NeMo Guardrails (~7k stars; input/dialog/output rails enforced in
+// code, not just prompts) and AI4Finance's FinGPT/FinRobot (grounded finance
+// agents): every answer is grounded in the provided snapshot, actions are
+// restricted to an allowlist of UI views, and refusals are deterministic.
 // ============================================================================
 
 const { all, get } = require('./db');
@@ -18,13 +20,40 @@ const { todayStr, daysAgo, daysAhead, inr, formatINR, minsSince } = require('./u
 const recon = require('./recon');
 const { TallyConnector } = require('./adapters');
 
-const AI_URL = (process.env.AI_PROVIDER_URL || '').replace(/\/$/, '');
-const AI_KEY = process.env.AI_API_KEY || '';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+// ---- provider config ----
+const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || process.env.AI_API_KEY || '';
+const DEEPSEEK_URL = (process.env.DEEPSEEK_BASE_URL || process.env.AI_PROVIDER_URL || 'https://api.deepseek.com').replace(/\/+$/, '');
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || process.env.AI_MODEL || 'deepseek-v4-flash';
+const DEEPSEEK_TIMEOUT_MS = Number(process.env.DEEPSEEK_TIMEOUT_MS || 15000);
+const AI_ENABLED = !!DEEPSEEK_KEY && process.env.AI_DISABLED !== '1';
 
 const fmt = formatINR;
+const VIEWS = new Set(['dashboard', 'cash', 'payables', 'payments', 'recon', 'gst', 'tally', 'system', 'settings']);
+const INTENTS = ['cash', 'payments', 'gst', 'recon', 'tally', 'runway', 'suggestions', 'general', 'off_topic'];
 
-// ---- quick data accessors (tenant-scoped) ----
+// ----------------------------------------------------------------------------
+// Guardrailed system prompt (token-efficient: ~330 tokens, all rails inline)
+// ----------------------------------------------------------------------------
+const SYS_PROMPT = [
+  'You are KhataOS Copilot, the AI assistant inside KhataOS — an Indian finance operating platform for mid-market companies (₹50–500 Cr revenue). You answer finance-operations questions using ONLY the DATA JSON in the user message.',
+  'RULES:',
+  '1 GROUNDING: Never invent numbers, invoices, vendors or dates. If the data lacks an answer, say what is missing and how to get it (connect a bank, refresh GSTR-2B, sync Tally).',
+  '2 NO ACTIONS: You never execute or change anything. You may only suggest UI actions through the "actions" array, using allowed views: dashboard, cash, payables, payments, recon, gst, tally, system, settings.',
+  '3 SCOPE: Only finance operations topics — cash, payables, payments, reconciliation, GST/ITC, runway/burn, Tally, vendors, spend. For anything else (personal, general knowledge, code, investment tips, authoritative tax/legal advice) reply in one polite sentence that you only cover the company\'s finance operations, set intent to "off_topic", and suggest a finance question.',
+  '4 COMPLIANCE: Never present tax or legal statements as authoritative — recommend confirming with the company CA/auditor when relevant.',
+  '5 FORMAT: Answer in ≤ 90 words. Indian conventions: ₹ with lakh/crore grouping (e.g. ₹1.25 Cr), dates dd MMM yyyy. Short bullet lists are fine.',
+  'OUTPUT: Reply with ONLY one JSON object: {"intent":"cash|payments|gst|recon|tally|runway|suggestions|general|off_topic","answer":"...","actions":[{"label":"...","view":"..."}]}',
+].join('\n');
+
+const SUGGEST_PROMPT = [
+  'You are KhataOS Copilot. From the DATA JSON, list up to 4 prioritized, specific actions for the Indian finance team.',
+  'RULES: only actions that clearly follow from the data; each action needs an allowed view (dashboard, cash, payables, payments, recon, gst, tally, system, settings); never invent numbers.',
+  'OUTPUT: Reply with ONLY one JSON object: {"intent":"suggestions","answer":"one-line summary","actions":[{"label":"...","view":"..."}]}',
+].join('\n');
+
+// ----------------------------------------------------------------------------
+// Data accessors (tenant-scoped)
+// ----------------------------------------------------------------------------
 async function cashPosition(coId) {
   const accounts = await all('SELECT * FROM bank_accounts WHERE company_id = ?', [coId]);
   let available = 0;
@@ -94,31 +123,96 @@ async function pendingApprovals(coId, role) {
     WHERE a.company_id = ? AND a.status = 'pending' AND a.required_role = ? ORDER BY i.due_date LIMIT 8`, [coId, role]);
 }
 
-// ---- suggestion engine (prioritized, role-aware) ----
-async function buildSuggestions(coId, role) {
-  const s = [];
-  const failed = (await get(`SELECT COUNT(*) AS c FROM payments WHERE company_id = ? AND status = 'failed'`, [coId])).c;
-  if (failed) s.push({ priority: 1, label: `${failed} failed payment${failed === 1 ? '' : 's'} need attention`, action: { type: 'navigate', view: 'payments', filter: 'failed' } });
-  const payPending = (await get(`SELECT COUNT(*) AS c FROM payments WHERE company_id = ? AND status = 'pending_approval'`, [coId])).c;
-  if (payPending && (role === 'cfo' || role === 'finance_manager')) s.push({ priority: 2, label: `${payPending} payment batch${payPending === 1 ? '' : 'es'} await${payPending === 1 ? 's' : ''} approval`, action: { type: 'navigate', view: 'payments', filter: 'pending_approval' } });
-  const overdue = (await get(`SELECT COUNT(*) AS c FROM invoices WHERE company_id = ? AND status IN ('approved','scheduled') AND due_date < ?`, [coId, todayStr()])).c;
-  if (overdue) s.push({ priority: 2, label: `${overdue} overdue invoice${overdue === 1 ? '' : 's'} — schedule payment`, action: { type: 'navigate', view: 'payables', filter: 'overdue' } });
-  const mine = (await pendingApprovals(coId, role)).length;
-  if (mine) s.push({ priority: 3, label: `${mine} invoice${mine === 1 ? '' : 's'} await${mine === 1 ? 's' : ''} your approval`, action: { type: 'navigate', view: 'payables', filter: 'pending_approval' } });
-  const mm = (await get(`SELECT COUNT(*) AS c FROM gst_mismatches WHERE company_id = ? AND status = 'open'`, [coId])).c;
-  if (mm) s.push({ priority: 3, label: `${mm} GSTR-2B mismatch${mm === 1 ? '' : 'es'} to review`, action: { type: 'navigate', view: 'gst' } });
-  const score = await recon.score(coId);
-  if (score.accuracy < score.target) s.push({ priority: 4, label: `Recon accuracy ${score.accuracy}% — below ${score.target}% target`, action: { type: 'navigate', view: 'recon' } });
-  const tally = await TallyConnector.health(coId);
-  const syncMins = minsSince(tally.last_sync_at);
-  if (syncMins != null && syncMins > 5) s.push({ priority: 4, label: `Tally sync ${syncMins} min old — check connector`, action: { type: 'navigate', view: 'tally' } });
+// ---- token-efficient context snapshot (short keys, capped arrays, raw numbers) ----
+async function compactContext(coId, role) {
+  const due = await duePayments(coId);
+  const cash = await cashPosition(coId);
   const rw = await runwayCalc(coId);
-  if (rw.runway_months != null && rw.runway_months < 3) s.push({ priority: 5, label: `Cash runway ${rw.runway_months} months — review outflows`, action: { type: 'navigate', view: 'cash' } });
-  return s.sort((a, b) => a.priority - b.priority).slice(0, 6);
+  const g = await gstPosition(coId);
+  const r = await reconPosition(coId);
+  const tally = await TallyConnector.health(coId);
+  const spend = await spendBreakdown(coId);
+  const failed = await all(`SELECT reference, amount FROM payments WHERE company_id = ? AND status = 'failed' ORDER BY created_at DESC LIMIT 3`, [coId]);
+  const pending = await pendingApprovals(coId, role);
+  const topVendors = await all(`SELECT v.name, SUM(i.net_payable) amt FROM vendors v JOIN invoices i ON i.vendor_id = v.id
+    WHERE v.company_id = ? AND i.status IN ('approved','scheduled','pending_approval') GROUP BY v.id ORDER BY amt DESC LIMIT 5`, [coId]);
+  return {
+    cash: { available: cash.available, uncleared: cash.uncleared, accounts: cash.accounts, synced_min: minsSince(cash.last_synced_at) },
+    runway: { months: rw.runway_months, burn: rw.monthly_burn },
+    due: due.rows.slice(0, 6).map((i) => ({ no: i.invoice_no, vendor: i.vendor_name, net: i.net_payable, due: i.due_date })),
+    overdue: due.overdue.slice(0, 6).map((i) => ({ no: i.invoice_no, vendor: i.vendor_name, net: i.net_payable, due: i.due_date })),
+    approvals_pending: pending.slice(0, 6).map((a) => ({ no: a.invoice_no, amt: a.gross_amount, role: a.required_role })),
+    gst: { itc: g.itc, liability: g.liability, period: g.period, open_mismatches: g.mismatches.length, mismatches: g.mismatches.slice(0, 5).map((m) => ({ inv: m.invoice_no, variance: m.variance })) },
+    recon: { accuracy: r.accuracy, matched: r.auto_matched, total: r.total, target: r.target, unmatched_30d: r.unmatched.length },
+    tally: { status: tally.status, synced_min: minsSince(tally.last_sync_at), uptime_30d: tally.uptime_30d },
+    spend_30d: spend.rows.slice(0, 4).map((x) => ({ cat: x.category, amt: x.amount })),
+    failed_payments: failed.map((p) => ({ ref: p.reference, amt: p.amount })),
+    top_vendors: topVendors.map((v) => ({ name: v.name, amt: v.amt })),
+  };
 }
 
-// ---- intent engine ----
-const INTENTS = [
+// ----------------------------------------------------------------------------
+// DeepSeek V4 Flash client (OpenAI-compatible)
+// ----------------------------------------------------------------------------
+async function callLlm(messages, maxTokens) {
+  if (!AI_ENABLED) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), DEEPSEEK_TIMEOUT_MS);
+  try {
+    const resp = await fetch(`${DEEPSEEK_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${DEEPSEEK_KEY}` },
+      body: JSON.stringify({
+        model: DEEPSEEK_MODEL,
+        messages,
+        temperature: 0.2,
+        max_tokens: maxTokens,
+        response_format: { type: 'json_object' },
+      }),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json().catch(() => null);
+    const text = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content;
+    return text ? String(text).trim() : null;
+  } catch {
+    return null; // API errors degrade gracefully to the rule engine
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---- output rail: strict JSON parse + view allowlist (deterministic) ----
+function parseLlm(text) {
+  if (!text) return null;
+  let cleaned = String(text);
+  const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) cleaned = fence[1];
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start >= 0 && end > start) cleaned = cleaned.slice(start, end + 1);
+  let obj;
+  try {
+    obj = JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+  const answer = typeof obj.answer === 'string' && obj.answer.trim() ? obj.answer.trim().slice(0, 800) : null;
+  if (!answer) return null;
+  const intent = INTENTS.includes(obj.intent) ? obj.intent : 'general';
+  const actions = Array.isArray(obj.actions)
+    ? obj.actions
+        .map((a) => ({ label: String((a && a.label) || '').slice(0, 80), view: String((a && a.view) || '') }))
+        .filter((a) => a.label && VIEWS.has(a.view))
+        .slice(0, 3)
+    : [];
+  return { intent, answer, actions };
+}
+
+// ----------------------------------------------------------------------------
+// Rule engine (offline default + fallback)
+// ----------------------------------------------------------------------------
+const INTENT_PATTERNS = [
   { id: 'suggestions', re: /should i|suggest|recommend|what can|what now|action items|to-?do|priorit|focus|advice|help me/i },
   { id: 'runway', re: /runway|burn rate|how long.*cash|months.*(left|last)|survive|out of cash/i },
   { id: 'cash', re: /cash|balance|available|funds?|position|money.*bank|total.*account|bank account/i },
@@ -136,7 +230,7 @@ const INTENTS = [
 
 function detectIntent(q) {
   const t = String(q || '').toLowerCase();
-  for (const i of INTENTS) if (i.re.test(t)) return i.id;
+  for (const i of INTENT_PATTERNS) if (i.re.test(t)) return i.id;
   return 'unknown';
 }
 
@@ -209,7 +303,7 @@ async function answerFor(intent, coId, user) {
       const rows = await all(`SELECT p.*, v.name AS vendor_name FROM payments p LEFT JOIN vendors v ON v.id = p.vendor_id WHERE p.company_id = ? AND p.status = 'failed' ORDER BY p.created_at DESC LIMIT 8`, [coId]);
       return {
         intent, data: { rows },
-        answer: rows.length ? `${rows.length} failed payment${rows.length === 1 ? '' : 's'} found — ${rows.map(r => r.reference).join(', ')}. Check the failure reason and retry.` : 'No failed payments right now.',
+        answer: rows.length ? `${rows.length} failed payment${rows.length === 1 ? '' : 's'} found — ${rows.map((r) => r.reference).join(', ')}. Check the failure reason and retry.` : 'No failed payments right now.',
       };
     }
     case 'vendors': {
@@ -219,7 +313,7 @@ async function answerFor(intent, coId, user) {
         GROUP BY v.id ORDER BY amount DESC LIMIT 6`, [coId]);
       return {
         intent, data: { rows },
-        answer: rows.length ? `Your top payables: ${rows.map(r => `${r.name} (${fmt(r.amount)})`).join(', ')}.` : 'No outstanding payables.',
+        answer: rows.length ? `Your top payables: ${rows.map((r) => `${r.name} (${fmt(r.amount)})`).join(', ')}.` : 'No outstanding payables.',
       };
     }
     case 'spend': {
@@ -246,59 +340,81 @@ async function answerFor(intent, coId, user) {
   }
 }
 
-// ---- optional generative layer (OpenAI-compatible) ----
-async function tryLlm(question, contextText) {
-  if (!AI_URL || !AI_KEY) return null;
+// ---- deterministic suggestion engine (role-aware, prioritized) ----
+async function buildSuggestionsRule(coId, role) {
+  const s = [];
+  const failed = (await get(`SELECT COUNT(*) AS c FROM payments WHERE company_id = ? AND status = 'failed'`, [coId])).c;
+  if (failed) s.push({ priority: 1, label: `${failed} failed payment${failed === 1 ? '' : 's'} need attention`, action: { type: 'navigate', view: 'payments', filter: 'failed' } });
+  const payPending = (await get(`SELECT COUNT(*) AS c FROM payments WHERE company_id = ? AND status = 'pending_approval'`, [coId])).c;
+  if (payPending && (role === 'cfo' || role === 'finance_manager')) s.push({ priority: 2, label: `${payPending} payment batch${payPending === 1 ? '' : 'es'} await${payPending === 1 ? 's' : ''} approval`, action: { type: 'navigate', view: 'payments', filter: 'pending_approval' } });
+  const overdue = (await get(`SELECT COUNT(*) AS c FROM invoices WHERE company_id = ? AND status IN ('approved','scheduled') AND due_date < ?`, [coId, todayStr()])).c;
+  if (overdue) s.push({ priority: 2, label: `${overdue} overdue invoice${overdue === 1 ? '' : 's'} — schedule payment`, action: { type: 'navigate', view: 'payables', filter: 'overdue' } });
+  const mine = (await pendingApprovals(coId, role)).length;
+  if (mine) s.push({ priority: 3, label: `${mine} invoice${mine === 1 ? '' : 's'} await${mine === 1 ? 's' : ''} your approval`, action: { type: 'navigate', view: 'payables', filter: 'pending_approval' } });
+  const mm = (await get(`SELECT COUNT(*) AS c FROM gst_mismatches WHERE company_id = ? AND status = 'open'`, [coId])).c;
+  if (mm) s.push({ priority: 3, label: `${mm} GSTR-2B mismatch${mm === 1 ? '' : 'es'} to review`, action: { type: 'navigate', view: 'gst' } });
+  const score = await recon.score(coId);
+  if (score.accuracy < score.target) s.push({ priority: 4, label: `Recon accuracy ${score.accuracy}% — below ${score.target}% target`, action: { type: 'navigate', view: 'recon' } });
+  const tally = await TallyConnector.health(coId);
+  const syncMins = minsSince(tally.last_sync_at);
+  if (syncMins != null && syncMins > 5) s.push({ priority: 4, label: `Tally sync ${syncMins} min old — check connector`, action: { type: 'navigate', view: 'tally' } });
+  const rw = await runwayCalc(coId);
+  if (rw.runway_months != null && rw.runway_months < 3) s.push({ priority: 5, label: `Cash runway ${rw.runway_months} months — review outflows`, action: { type: 'navigate', view: 'cash' } });
+  return s.sort((a, b) => a.priority - b.priority).slice(0, 6);
+}
+
+// Suggestion entry point: LLM when configured, rule engine otherwise.
+async function buildSuggestions(coId, role) {
+  const fallback = await buildSuggestionsRule(coId, role);
+  if (!AI_ENABLED) return fallback;
   try {
-    const resp = await fetch(AI_URL + '/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + AI_KEY },
-      body: JSON.stringify({
-        model: AI_MODEL,
-        messages: [
-          { role: 'system', content: 'You are KhataOS Assistant, the finance copilot for an Indian mid-market company. Answer using ONLY the provided live platform data. Use Indian number format (₹ with lakh/crore grouping). Be concise and specific. If asked for advice, give one clear prioritized recommendation.' },
-          { role: 'user', content: `Live platform data:\n${contextText}\n\nQuestion: ${question}` },
-        ],
-        temperature: 0.3,
-      }),
-    });
-    if (!resp.ok) return null;
-    const json = await resp.json().catch(() => null);
-    const text = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content;
-    return text ? String(text).trim() : null;
-  } catch { return null; }
+    const ctx = await compactContext(coId, role);
+    const out = await callLlm(
+      [{ role: 'system', content: SUGGEST_PROMPT }, { role: 'user', content: `DATA:\n${JSON.stringify(ctx)}` }],
+      260
+    );
+    const parsed = parseLlm(out);
+    if (parsed && parsed.actions.length) {
+      return parsed.actions.map((a) => ({ label: a.label, action: { type: 'navigate', view: a.view } }));
+    }
+  } catch { /* fall through to rule engine */ }
+  return fallback;
 }
 
-async function contextSnapshot(coId) {
-  const due = await duePayments(coId);
-  const snap = {
-    cash: await cashPosition(coId),
-    runway: await runwayCalc(coId),
-    due_this_week: due.rows.map(i => ({ invoice_no: i.invoice_no, vendor: i.vendor_name, net_payable: i.net_payable, due_date: i.due_date })),
-    overdue: due.overdue.map(i => ({ invoice_no: i.invoice_no, vendor: i.vendor_name, net_payable: i.net_payable, due_date: i.due_date })),
-    gst: await gstPosition(coId),
-    recon: await reconPosition(coId),
-    tally: await TallyConnector.health(coId),
-    spend_30d: await spendBreakdown(coId),
-  };
-  return JSON.stringify(snap, null, 1).slice(0, 24000);
-}
-
+// ---- ask: LLM first (with guardrails), rule engine fallback ----
 async function ask(user, question) {
   const coId = user.company_id;
   const intent = detectIntent(question);
   const base = await answerFor(intent, coId, user);
-  let llm = null;
-  if (intent !== 'greeting' && intent !== 'unknown') {
-    llm = await tryLlm(question, await contextSnapshot(coId));
+  if (AI_ENABLED && intent !== 'greeting') {
+    try {
+      const ctx = await compactContext(coId, user.role);
+      const out = await callLlm(
+        [{ role: 'system', content: SYS_PROMPT }, { role: 'user', content: `DATA:\n${JSON.stringify(ctx)}\n\nQUESTION: ${question}` }],
+        450
+      );
+      const parsed = parseLlm(out);
+      if (parsed) {
+        return {
+          intent: parsed.intent,
+          answer: parsed.answer,
+          data: base.data,
+          suggestions: parsed.actions.map((a) => ({ label: a.label, action: { type: 'navigate', view: a.view } })),
+          generative: true,
+          prompts: PROMPTS,
+          model: DEEPSEEK_MODEL,
+        };
+      }
+    } catch { /* degrade to rule engine */ }
   }
   return {
     intent: base.intent,
-    answer: llm || base.answer,
+    answer: base.answer,
     data: base.data,
     suggestions: await buildSuggestions(coId, user.role),
-    generative: !!llm,
+    generative: false,
     prompts: PROMPTS,
+    model: DEEPSEEK_MODEL,
   };
 }
 
@@ -313,4 +429,21 @@ const PROMPTS = [
   { label: 'Is Tally syncing?', q: 'Is Tally syncing properly?' },
 ];
 
-module.exports = { ask, buildSuggestions, PROMPTS, intent_status: () => ({ generative_configured: !!(AI_URL && AI_KEY), provider: AI_URL || 'deterministic-engine', model: AI_MODEL }) };
+function intentStatus() {
+  return {
+    enabled: AI_ENABLED,
+    generative_configured: AI_ENABLED,
+    provider: AI_ENABLED ? (DEEPSEEK_URL.includes('deepseek') ? 'deepseek' : 'openai-compatible') : 'deterministic-engine',
+    model: AI_ENABLED ? DEEPSEEK_MODEL : null,
+    base_url: DEEPSEEK_URL,
+    guardrails: ['grounded-in-data', 'no-action-claims', 'scope-refusal', 'view-allowlist', 'json-output-rail'],
+  };
+}
+
+module.exports = {
+  ask,
+  buildSuggestions,
+  PROMPTS,
+  intent_status: intentStatus,
+  _internals: { parseLlm, compactContext, VIEWS, detectIntent, AI_ENABLED, DEEPSEEK_MODEL, DEEPSEEK_URL },
+};

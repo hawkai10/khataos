@@ -10,6 +10,8 @@
 const { db, insert, update, run, all, get } = require('./db');
 const { mulberry32, uid, nowIso, todayStr, daysAgo, addDays, inr, shortRef } = require('./util');
 const Gstn = require('./gstn');
+const Tally = require('./tally');
+const TallyMapping = require('./tally-mapping');
 
 function hashCode(str) {
   let h = 0;
@@ -276,7 +278,7 @@ queue.on('gateway.execute', async (job, payload) => { await PaymentGateway.execu
 // TALLY CONNECTOR (Windows service, ODBC + XML; TallyPrime >= 2.1)
 // ----------------------------------------------------------------------------
 const TallyConnector = {
-  name: 'mock-tallyprime-odbc',
+  name: 'tally-xml-upload',
   version: 'TallyPrime 4.2',
 
   async health(companyId) {
@@ -286,6 +288,7 @@ const TallyConnector = {
       ...(h || {}),
       queue_depth: q ? q.c : 0,
       connected: !!(h && h.status === 'connected'),
+      connector: Tally.config(),
     };
   },
 
@@ -326,12 +329,21 @@ const TallyConnector = {
     if (!p) return;
     const synced = p.status === 'completed';
     await TallyConnector.logSync(p.company_id, 'voucher', paymentId, 'create', synced ? 'queued' : 'failed', synced ? null : 'payment failed, voucher not created');
-    if (synced) {
-      setTimeout(async () => {
-        await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), paymentId]);
-        await TallyConnector.heartbeat(p.company_id);
-      }, 1000);
-    }
+    if (!synced) return;
+    setTimeout(async () => {
+      await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), paymentId]);
+      await TallyConnector.heartbeat(p.company_id);
+    }, 1000);
+  },
+
+  // Pull ledger masters from the imported Tally XML and re-run vendor
+  // auto-mapping (cloud-only: "pull" = refresh from the imported masters).
+  async pullLedgers(companyId) {
+    const count = (await get('SELECT COUNT(*) AS c FROM tally_ledgers WHERE company_id = ?', [companyId])).c;
+    const mapping = await TallyMapping.autoMap(companyId);
+    await TallyConnector.logSync(companyId, 'ledger', 'vendors', 'pull', 'synced', `pulled ${count} imported ledger(s), auto-mapped ${mapping.updated.length} vendor(s)`);
+    await TallyConnector.heartbeat(companyId);
+    return { ledgers: count, mapped: mapping.updated.length };
   },
 };
 
@@ -509,6 +521,28 @@ const GstDataProvider = {
         mismatches.push({ invoice_no: i.invoice_no, vendor_gstin: i.gstin_vendor, vendor_name: i.vendor_name || '', platform_amount: platformItc, gstr2b_amount: 0, variance: platformItc, note: 'Supplier invoice not yet reflected in GSTR-2B' });
       } else if (Math.abs((g.cgst + g.sgst + g.igst) - platformItc) > 1) {
         mismatches.push({ invoice_no: i.invoice_no, vendor_gstin: i.gstin_vendor, vendor_name: i.vendor_name || '', platform_amount: platformItc, gstr2b_amount: g.cgst + g.sgst + g.igst, variance: inr(platformItc - (g.cgst + g.sgst + g.igst)), note: 'ITC amount differs from GSTR-2B' });
+      }
+    }
+    // Tally-imported purchase vouchers are authoritative once imported:
+    // compare their BILLALLOCATIONS invoice refs against the GSTR-2B rows.
+    const tallyVouchers = await all(`SELECT voucher_number, amount, party_name, entry_json FROM tally_vouchers WHERE company_id = ? AND voucher_type = 'Purchase'`, [companyId]);
+    const tallyLedgers = await all('SELECT name, gstin FROM tally_ledgers WHERE company_id = ?', [companyId]);
+    const gstinByName = new Map(tallyLedgers.map((l) => [l.name, l.gstin]));
+    const parseJson = (j) => { try { return JSON.parse(j || '[]'); } catch { return []; } };
+    for (const v of tallyVouchers) {
+      const refs = [];
+      for (const e of parseJson(v.entry_json)) for (const r of e.bill_refs || []) refs.push(r);
+      const ref = refs[0];
+      if (!ref) continue;
+      const g = g2bMap.get(ref);
+      const platformAmount = Math.abs(v.amount || 0);
+      if (!g) {
+        mismatches.push({ invoice_no: ref, vendor_gstin: gstinByName.get(v.party_name) || null, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: 0, variance: platformAmount, note: 'Tally purchase voucher not yet reflected in GSTR-2B' });
+      } else {
+        const g2bAmount = (g.taxable || 0) + (g.cgst || 0) + (g.sgst || 0) + (g.igst || 0);
+        if (Math.abs(g2bAmount - platformAmount) > 1) {
+          mismatches.push({ invoice_no: ref, vendor_gstin: gstinByName.get(v.party_name) || null, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: g2bAmount, variance: inr(platformAmount - g2bAmount), note: 'Tally purchase voucher amount differs from GSTR-2B' });
+        }
       }
     }
     for (const mm of mismatches) {

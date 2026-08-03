@@ -7,6 +7,8 @@ const { ApiError, login, logout, requireAuth, requireRole, audit, recentAudit, p
 const { queue, BankDataProvider, PaymentGateway, TallyConnector, OcrEngine, GstDataProvider, EmailInbox, createApprovalChain } = require('./adapters');
 const Decentro = require('./decentro');
 const Gstn = require('./gstn');
+const TallyImport = require('./tally-import');
+const TallyMapping = require('./tally-mapping');
 const recon = require('./recon');
 const Assistant = require('./ai');
 
@@ -303,6 +305,24 @@ function createRouter() {
   // ===================== AP / INVOICES =====================
   r.get('/api/vendors', async (req, res, p, user) => {
     ok(res, await all('SELECT * FROM vendors WHERE company_id = ? AND active = 1 ORDER BY name', [companyOf(user)]));
+  });
+
+  // Payables aging from imported Tally purchase vouchers (authoritative once
+  // imported): age buckets by voucher date vs today.
+  r.get('/api/payables/aging', async (req, res, p, user) => {
+    const coId = companyOf(user);
+    const rows = await all(`SELECT voucher_number, date, amount, party_name FROM tally_vouchers WHERE company_id = ? AND voucher_type = 'Purchase' ORDER BY date`, [coId]);
+    const today = Date.parse(todayStr());
+    const buckets = { current: 0, '31-60': 0, '61-90': 0, '90+': 0 };
+    const items = [];
+    for (const v of rows) {
+      const age = Math.max(0, Math.floor((today - Date.parse(v.date)) / 86400000));
+      const bucket = age <= 30 ? 'current' : age <= 60 ? '31-60' : age <= 90 ? '61-90' : '90+';
+      const amount = Math.abs(v.amount || 0);
+      buckets[bucket] += amount;
+      items.push({ voucher_number: v.voucher_number, date: v.date, party_name: v.party_name, age, bucket, amount: inr(amount) });
+    }
+    ok(res, { buckets, total: inr(items.reduce((s, i) => s + i.amount, 0)), items });
   });
 
   r.get('/api/invoices', async (req, res, p, user) => {
@@ -651,6 +671,9 @@ function createRouter() {
       const suggestion = payments.find(p => p.net_amount && Math.abs(Math.abs(t.amount) - p.net_amount) <= 1);
       t.suggested_payment = suggestion ? { id: suggestion.id, reference: suggestion.reference, vendor_id: suggestion.vendor_id, net_amount: suggestion.net_amount } : null;
     }
+    const mismatchRows = await all(`SELECT bank_txn_id, notes FROM recon_matches WHERE company_id = ? AND status = 'mismatch' ORDER BY matched_at DESC`, [coId]);
+    const mismatchByTxn = new Map(mismatchRows.map((m) => [m.bank_txn_id, m.notes]));
+    for (const t of rows) t.mismatch_note = mismatchByTxn.get(t.id) || null;
     ok(res, rows);
   });
 
@@ -765,13 +788,61 @@ function createRouter() {
   r.post('/api/tally/pull-ledgers', async (req, res, p, user) => {
     requireRole(user, ['cfo', 'finance_manager']);
     const coId = companyOf(user);
-    await TallyConnector.logSync(coId, 'ledger', 'vendors', 'pull', 'queued');
-    setTimeout(async () => {
-      await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity='ledger' AND status='queued'", [nowIso()]);
-      await TallyConnector.heartbeat(coId);
-    }, 1200);
-    await audit(coId, user, 'tally.pull_ledgers', 'tally', null, {});
-    ok(res, { queued: true });
+    const ledgers = await TallyConnector.pullLedgers(coId);
+    await audit(coId, user, 'tally.pull_ledgers', 'tally', null, { ledgers: ledgers.ledgers, mapped: ledgers.mapped });
+    ok(res, ledgers);
+  });
+
+  // Cloud-only path: user exports Groups/Ledgers/Vouchers from Tally as XML
+  // and uploads it. Validated, then imported in sequence (Groups -> Ledgers
+  // -> Vouchers). Works without any live Tally connection.
+  r.post('/api/tally/import-xml', async (req, res, p, user) => {
+    requireRole(user, ['cfo', 'finance_manager']);
+    const coId = companyOf(user);
+    const xml = String((req.body || {}).xml || '').trim();
+    if (!xml) throw new ApiError(400, 'xml payload required');
+    let result;
+    try {
+      result = await TallyImport.handleImport(coId, xml);
+    } catch (err) {
+      throw new ApiError(400, err.message);
+    }
+    const totalImported = result.imported.groups.imported + result.imported.ledgers.imported + result.imported.vouchers.imported;
+    const totalSkipped = result.imported.groups.skipped + result.imported.ledgers.skipped + result.imported.vouchers.skipped;
+    await TallyConnector.logSync(coId, 'import', 'xml', 'import', 'synced',
+      `imported ${totalImported}, skipped ${totalSkipped}, errors ${result.validation.errors.length}`);
+    await audit(coId, user, 'tally.xml_import', 'tally', 'xml', {
+      parsed: result.parsed, imported: result.imported, errors: result.validation.errors.length,
+    });
+    let mapping = null;
+    try {
+      const m = await TallyMapping.autoMap(coId);
+      mapping = { updated: m.updated };
+    } catch { /* mapping is best-effort; the import itself already succeeded */ }
+    ok(res, { ...result, mapping });
+  });
+
+  r.get('/api/tally/mappings', async (req, res, p, user) => {
+    ok(res, await TallyMapping.report(companyOf(user)));
+  });
+
+  r.post('/api/tally/mappings/auto', async (req, res, p, user) => {
+    requireRole(user, ['cfo', 'finance_manager']);
+    const coId = companyOf(user);
+    const result = await TallyMapping.autoMap(coId);
+    await audit(coId, user, 'tally.auto_map', 'tally', null, { updated: result.updated.length });
+    await TallyConnector.logSync(coId, 'ledger', 'mapping', 'map', 'synced', `auto-mapped ${result.updated.length} vendor(s)`);
+    ok(res, result);
+  });
+
+  r.post('/api/tally/mappings', async (req, res, p, user) => {
+    requireRole(user, ['cfo', 'finance_manager']);
+    const coId = companyOf(user);
+    const { vendor_id, ledger_name } = req.body || {};
+    if (!vendor_id) throw new ApiError(400, 'vendor_id required');
+    const result = await TallyMapping.setMapping(coId, vendor_id, ledger_name);
+    await audit(coId, user, 'tally.mapping_set', 'vendor', vendor_id, { ledger_name: result.ledger_name });
+    ok(res, result);
   });
 
   r.post('/api/tally/retry/:id', async (req, res, p, user) => {

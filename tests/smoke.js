@@ -218,9 +218,52 @@ async function waitForServer(proc, ms = 20000) {
 
     // ---- tally ----
     const tally = await api('GET', '/api/tally/health', null, cfo);
-    check('tally: health endpoint', !!tally && (tally.status === 'connected' || tally.status === 'degraded'));
+    check('tally: health endpoint', !!tally && (tally.status === 'connected' || tally.status === 'degraded') && tally.connector && tally.connector.provider === 'tally-xml-upload', tally.connector ? tally.connector.provider : 'no connector');
     const logs = await api('GET', '/api/tally/sync-logs', null, cfo);
     check('tally: sync logs recorded', logs.length > 0);
+    const importRes = await api('POST', '/api/tally/import-xml', {
+      xml: '<ENVELOPE><BODY><DATA><TALLYMESSAGE><GROUP><NAME>Smoke Group</NAME></GROUP></TALLYMESSAGE><TALLYMESSAGE><LEDGER><NAME>Smoke Ledger</NAME><PARENT>Smoke Group</PARENT></LEDGER></TALLYMESSAGE></DATA></BODY></ENVELOPE>',
+    }, cfo);
+    check('tally: xml import parses + imports in sequence', importRes.parsed.groups === 1 && importRes.imported.groups.imported === 1 && importRes.imported.ledgers.imported === 1 && importRes.validation.errors.length === 0, JSON.stringify(importRes.imported).slice(0, 80));
+    const mapping = await api('GET', '/api/tally/mappings', null, cfo);
+    check('tally: vendor-ledger mapping report', mapping && Array.isArray(mapping.rows) && mapping.ledgers.some((l) => l.name === 'Smoke Ledger'), JSON.stringify(mapping ? mapping.summary : null));
+    const autoMap = await api('POST', '/api/tally/mappings/auto', {}, cfo);
+    check('tally: auto-map runs', autoMap && Array.isArray(autoMap.updated), JSON.stringify(autoMap));
+    let mapBlocked = false;
+    try { await api('POST', '/api/tally/mappings', { vendor_id: 'v_cement', ledger_name: 'Smoke Ledger' }, exec); }
+    catch (e) { mapBlocked = e.status === 403; }
+    check('RBAC: executive cannot edit ledger mappings', mapBlocked);
+    const guidXml = (alterid, amount) => '<ENVELOPE><BODY><DATA>' +
+      '<TALLYMESSAGE><GROUP><NAME>Current Liabilities</NAME></GROUP></TALLYMESSAGE>' +
+      '<TALLYMESSAGE><GROUP><NAME>Sundry Creditors</NAME><PARENT>Current Liabilities</PARENT></GROUP></TALLYMESSAGE>' +
+      '<TALLYMESSAGE><LEDGER><NAME>Smoke Vendor</NAME><PARENT>Sundry Creditors</PARENT></LEDGER></TALLYMESSAGE>' +
+      '<TALLYMESSAGE><VOUCHER VCHTYPE="Payment" ACTION="Create"><GUID>g-smoke-1</GUID><ALTERID>' + alterid + '</ALTERID>' +
+      '<DATE>20260730</DATE><VOUCHERNUMBER>SMK-1</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>' +
+      '<PARTYLEDGERNAME>Smoke Vendor</PARTYLEDGERNAME>' +
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Rent Expenses</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-' + amount + '.00</AMOUNT></LEDGERENTRIES.LIST>' +
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Smoke Vendor</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>' + amount + '.00</AMOUNT></LEDGERENTRIES.LIST>' +
+      '</VOUCHER></TALLYMESSAGE></DATA></BODY></ENVELOPE>';
+    const guid1 = await api('POST', '/api/tally/import-xml', { xml: guidXml(1, 1000) }, cfo);
+    check('tally: GUID import inserts', guid1.imported.vouchers.imported === 1, JSON.stringify(guid1.imported));
+    const guid2 = await api('POST', '/api/tally/import-xml', { xml: guidXml(2, 1500) }, cfo);
+    check('tally: edited re-export counts as Updated', guid2.imported.vouchers.updated === 1 && guid2.imported.vouchers.imported === 0, JSON.stringify(guid2.imported));
+    const guid3 = await api('POST', '/api/tally/import-xml', { xml: guidXml(2, 1500) }, cfo);
+    check('tally: same ALTERID re-upload skips', guid3.imported.vouchers.skipped === 1 && guid3.imported.vouchers.updated === 0, JSON.stringify(guid3.imported));
+    const unbalXml = '<ENVELOPE><BODY><DATA>' +
+      '<TALLYMESSAGE><LEDGER><NAME>Rent Expenses</NAME><PARENT>Current Liabilities</PARENT></LEDGER></TALLYMESSAGE>' +
+      '<TALLYMESSAGE><VOUCHER><DATE>20260730</DATE><VOUCHERNUMBER>SMK-UNBAL</VOUCHERNUMBER><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>' +
+      '<PARTYLEDGERNAME>Smoke Vendor</PARTYLEDGERNAME>' +
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Rent Expenses</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1000.00</AMOUNT></LEDGERENTRIES.LIST>' +
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Smoke Vendor</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>900.00</AMOUNT></LEDGERENTRIES.LIST>' +
+      '</VOUCHER></TALLYMESSAGE></DATA></BODY></ENVELOPE>';
+    const unbal = await api('POST', '/api/tally/import-xml', { xml: unbalXml }, cfo);
+    check('tally: unbalanced voucher rejected with specific error',
+      unbal.validation.errors.some((e) => e.message.includes('unbalanced')) && unbal.imported.vouchers.skipped === 1,
+      JSON.stringify(unbal.validation.errors));
+    const pull = await api('POST', '/api/tally/pull-ledgers', null, cfo);
+    check('tally: pull-ledgers refreshes from imported masters', pull && typeof pull.ledgers === 'number' && typeof pull.mapped === 'number', JSON.stringify(pull));
+    const aging = await api('GET', '/api/payables/aging', null, cfo);
+    check('payables: aging buckets from Tally purchase vouchers', aging && typeof aging.buckets === 'object' && 'current' in aging.buckets && typeof aging.total === 'number', JSON.stringify(aging));
 
     // ---- metrics + onboarding + static app ----
     const metrics = await api('GET', '/api/metrics', null, cfo);
@@ -247,8 +290,11 @@ async function waitForServer(proc, ms = 20000) {
     const page = await fetch(BASE + '/');
     const html = await page.text();
     check('web: SPA served', page.ok && html.includes('KhataOS'), html.slice(0, 60));
-    const appJs = await fetch(BASE + '/js/app.js');
-    check('web: app.js served', appJs.ok);
+    // React build serves a hashed /assets bundle; the legacy SPA serves /js/app.js.
+    const assetMatch = html.match(/src="(\/assets\/[^"]+\.js)"/);
+    const bundlePath = assetMatch ? assetMatch[1] : '/js/app.js';
+    const appJs = await fetch(BASE + bundlePath);
+    check('web: app bundle served', appJs.ok, bundlePath);
 
     console.log(`\n${passed} passed, ${failed} failed`);
   } catch (err) {

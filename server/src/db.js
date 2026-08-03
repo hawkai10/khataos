@@ -355,7 +355,73 @@ CREATE TABLE IF NOT EXISTS decentro_links (
   created_at TEXT NOT NULL,
   linked_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS tally_groups (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  parent TEXT,
+  tally_guid TEXT,
+  tally_alterid INTEGER DEFAULT 0,
+  UNIQUE(company_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS tally_ledgers (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  group_name TEXT,
+  opening_balance REAL DEFAULT 0,
+  gstin TEXT,
+  tally_guid TEXT,
+  tally_alterid INTEGER DEFAULT 0,
+  UNIQUE(company_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS tally_vouchers (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  voucher_number TEXT,
+  voucher_type TEXT,
+  date TEXT,
+  amount REAL DEFAULT 0,
+  party_name TEXT,
+  entry_json TEXT DEFAULT '[]',
+  tally_guid TEXT,
+  tally_alterid INTEGER DEFAULT 0,
+  imported_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_vouchers_guid ON tally_vouchers(company_id, tally_guid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_ledgers_guid ON tally_ledgers(company_id, tally_guid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_groups_guid ON tally_groups(company_id, tally_guid);
 `;
+
+// Startup migrations for databases created before these columns existed.
+// ALTER TABLE ADD COLUMN errors are ignored when the column is already there.
+const MIGRATIONS = [
+  'ALTER TABLE tally_vouchers ADD COLUMN tally_guid TEXT',
+  'ALTER TABLE tally_vouchers ADD COLUMN tally_alterid INTEGER DEFAULT 0',
+  'ALTER TABLE tally_ledgers ADD COLUMN tally_guid TEXT',
+  'ALTER TABLE tally_ledgers ADD COLUMN tally_alterid INTEGER DEFAULT 0',
+  'ALTER TABLE tally_groups ADD COLUMN tally_guid TEXT',
+  'ALTER TABLE tally_groups ADD COLUMN tally_alterid INTEGER DEFAULT 0',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_vouchers_guid ON tally_vouchers(company_id, tally_guid)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_ledgers_guid ON tally_ledgers(company_id, tally_guid)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_groups_guid ON tally_groups(company_id, tally_guid)',
+];
+
+function runMigrations(exec) {
+  for (const sql of MIGRATIONS) {
+    try { exec(sql); } catch { /* column/index already exists */ }
+  }
+}
+
+async function runMigrationsAsync(exec) {
+  for (const sql of MIGRATIONS) {
+    try { await exec(sql); } catch { /* column/index already exists */ }
+  }
+}
 
 // PostgreSQL flavour: amounts as double precision so they return as JS numbers
 // (identical to SQLite REAL semantics); flags stay INTEGER so `= 1` checks
@@ -382,6 +448,7 @@ if (DB_ENGINE === 'sqlite') {
     sqliteDb.exec('PRAGMA journal_mode = WAL;');
     sqliteDb.exec('PRAGMA foreign_keys = ON;');
     sqliteDb.exec(SCHEMA);
+    runMigrations((sql) => sqliteDb.exec(sql));
   } catch (err) {
     const fallbackDir = path.join(os.tmpdir(), 'khataos-data');
     fs.mkdirSync(fallbackDir, { recursive: true });
@@ -394,6 +461,7 @@ if (DB_ENGINE === 'sqlite') {
     sqliteDb.exec('PRAGMA journal_mode = WAL;');
     sqliteDb.exec('PRAGMA foreign_keys = ON;');
     sqliteDb.exec(SCHEMA);
+    runMigrations((sql) => sqliteDb.exec(sql));
     console.warn(`[db] Could not open ${PRIMARY_DB} (${err.message}). Using ${DB_PATH} instead.`);
   }
   impl = {
@@ -411,6 +479,7 @@ if (DB_ENGINE === 'sqlite') {
       const { Pool } = require('pg');
       client = new Pool({ connectionString: DATABASE_URL, max: 10 });
       await client.query(PG_SCHEMA);
+      await runMigrationsAsync((sql) => client.query(sql));
       impl = {
         all: async (sql, params) => (await client.query(translate(sql), params)).rows,
         get: async (sql, params) => (await client.query(translate(sql), params)).rows[0] || null,
@@ -425,6 +494,7 @@ if (DB_ENGINE === 'sqlite') {
         : new PGlite();
       DB_PATH = pgliteDir || '(in-memory pglite)';
       await client.exec(PG_SCHEMA);
+      await runMigrationsAsync((sql) => client.exec(sql));
       impl = {
         all: async (sql, params) => (await client.query(translate(sql), params)).rows,
         get: async (sql, params) => (await client.query(translate(sql), params)).rows[0] || null,

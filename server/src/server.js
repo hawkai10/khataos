@@ -1,5 +1,7 @@
 'use strict';
 
+require('./env').loadEnv(); // load .env before any config is read
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -9,7 +11,11 @@ const { seedIfEmpty } = require('./seed');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const WEB_ROOT = path.join(__dirname, '..', '..', 'web');
+const FRONTEND_DIST = path.join(__dirname, '..', '..', 'webapp', 'dist');
 const DOCS_ROOT = path.join(__dirname, '..', '..', 'docs');
+// Prefer the React + shadcn-style build (webapp/dist) when present; fall back
+// to the legacy zero-dependency SPA (web/) so the repo always runs.
+const HAS_FRONTEND = fs.existsSync(path.join(FRONTEND_DIST, 'index.html'));
 
 const router = createRouter();
 
@@ -45,11 +51,20 @@ function serveStatic(req, res, pathname) {
   let rel = decodeURIComponent(pathname);
   if (rel === '/') rel = '/index.html';
   if (rel.includes('..')) { res.writeHead(403); res.end('forbidden'); return; }
-  const root = rel.startsWith('/docs/') ? DOCS_ROOT : WEB_ROOT;
+  const root = rel.startsWith('/docs/') ? DOCS_ROOT : (HAS_FRONTEND ? FRONTEND_DIST : WEB_ROOT);
   const file = path.join(root, rel.replace(/^\/docs\//, ''));
   if (!file.startsWith(root)) { res.writeHead(403); res.end('forbidden'); return; }
   fs.readFile(file, (err, buf) => {
     if (err) {
+      // SPA fallback: unknown non-API paths serve the React app's index.html
+      // so client-side navigation/refresh keeps working.
+      if (HAS_FRONTEND && !pathname.startsWith('/api/')) {
+        return fs.readFile(path.join(FRONTEND_DIST, 'index.html'), (err2, buf2) => {
+          if (err2) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('Not found'); return; }
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(buf2);
+        });
+      }
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('Not found');
       return;

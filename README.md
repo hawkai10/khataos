@@ -6,20 +6,32 @@ accounts payable, vendor payment execution, automatic bank reconciliation,
 GST compliance tracking, and TallyPrime sync — built native to the Indian
 financial ecosystem, not a global TMS retrofitted for India.
 
-This repository contains the **runnable MVP**: a zero-dependency Node.js
-backend (SQLite via `node:sqlite`) and a responsive single-page web app. All
-external integrations (Account Aggregator, ICICI/HDFC direct APIs,
-RazorpayX/Cashfree, TallyPrime, GSTN) are implemented behind real adapter
-interfaces with **simulated adapters** preloaded, so the entire product can be
-demonstrated end-to-end without credentials. Swapping a simulator for the real
-provider is a contained change (see `docs/architecture.md`).
+This repository contains the **runnable MVP**: a Node.js backend (SQLite via
+`node:sqlite`) and a **React + Tailwind + shadcn-style UI** (Vite build in
+`webapp/`) with a zero-dependency legacy SPA fallback in `web/`. All external
+integrations (Account Aggregator, ICICI/HDFC direct APIs, RazorpayX/Cashfree,
+TallyPrime, GSTN) are implemented behind real adapter interfaces with
+**simulated adapters** preloaded, so the entire product can be demonstrated
+end-to-end without credentials. Swapping a simulator for the real provider is
+a contained change (see `docs/architecture.md`).
 
 ---
 
 ## Quick start
 
-Requirements: **Node.js 22+** on Windows, macOS, or Linux. No `npm install`
-needed.
+Requirements: **Node.js 22+** on Windows, macOS, or Linux.
+
+Build the web app (once, or after UI changes):
+
+```powershell
+cd webapp
+npm install
+npm run build
+cd ..
+```
+
+If `webapp/dist` is absent, the server serves the legacy `web/` SPA instead,
+so the repo always runs even before the frontend is built.
 
 ```powershell
 cd khataos
@@ -63,6 +75,34 @@ The adapter also models the e-invoice IRP `generate` contract. Auth flow is
 OTP request -> AUTHTOKEN, exactly like the GSP portal. Full guide, endpoints,
 mapping, and go-live steps: [docs/gstn.md](docs/gstn.md). Check status at
 `GET /api/gstn/config` or under `integrations.gstn` in System Health.
+
+### AI Copilot via DeepSeek (optional)
+
+The built-in Copilot answers cash/payables/GST questions from live platform
+data. Out of the box it uses a deterministic rule engine (zero cost, offline);
+set a DeepSeek key to enable **DeepSeek V4 Flash** generation:
+
+```powershell
+Copy-Item .env.example .env
+# edit .env -> set DEEPSEEK_API_KEY
+node server/src/server.js
+```
+
+The assistant is grounded in a compact live-data snapshot with guardrails
+(scope refusal, view allowlist, strict JSON output, graceful fallback), modeled
+on NVIDIA NeMo Guardrails and AI4Finance FinGPT/FinRobot. Full guide:
+[docs/ai-assistant.md](docs/ai-assistant.md).
+
+### Tally integration (cloud XML upload)
+
+KhataOS runs in the cloud, so Tally data arrives as **XML exports uploaded in
+the app** — no live Tally connection or port-9000 connector. Export Groups,
+Ledgers and Vouchers from Tally as XML and upload via the Tally page's
+**Import Tally XML** dialog. The parser handles real Tally variants
+(`VCHNUM`/`VCHDATE`, attributes, entries-derived amounts), the pipeline
+validates every reference (group → ledger → voucher), then imports in the
+correct sequence, deduplicated per company. Details:
+[docs/tally-connector.md](docs/tally-connector.md).
 
 | Role | Email | Password | Can do |
 | --- | --- | --- | --- |
@@ -133,7 +173,8 @@ khataos/
       auth.js      sessions + role-based access control
       api.js       REST API handlers for all modules
     data/          khataos.db (created at runtime)
-  web/             responsive SPA (no build step)
+  webapp/          React + Tailwind + shadcn-style UI (Vite; build -> dist)
+  web/             legacy zero-dependency SPA (fallback when webapp is not built)
   deploy/          production artifacts: Postgres/ClickHouse, AWS notes
   tests/           smoke.js (end-to-end API), decentro.test.js, gstn.test.js
 ```
