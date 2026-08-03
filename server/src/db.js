@@ -389,6 +389,7 @@ CREATE TABLE IF NOT EXISTS tally_vouchers (
   entry_json TEXT DEFAULT '[]',
   tally_guid TEXT,
   tally_alterid INTEGER DEFAULT 0,
+  cancelled INTEGER NOT NULL DEFAULT 0,
   imported_at TEXT NOT NULL
 );
 
@@ -402,6 +403,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_groups_guid ON tally_groups(company_
 const MIGRATIONS = [
   'ALTER TABLE tally_vouchers ADD COLUMN tally_guid TEXT',
   'ALTER TABLE tally_vouchers ADD COLUMN tally_alterid INTEGER DEFAULT 0',
+  'ALTER TABLE tally_vouchers ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0',
   'ALTER TABLE tally_ledgers ADD COLUMN tally_guid TEXT',
   'ALTER TABLE tally_ledgers ADD COLUMN tally_alterid INTEGER DEFAULT 0',
   'ALTER TABLE tally_groups ADD COLUMN tally_guid TEXT',

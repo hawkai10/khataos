@@ -307,6 +307,28 @@ async function check(name, fn) {
     assert.strictEqual(r3.imported.vouchers.updated, 0);
   });
 
+  await check('import: cancelled voucher is stored with cancelled=1 and still counted for audit', async () => {
+    const co = coId + '-cancelled';
+    const xml = [
+      '<ENVELOPE><BODY><DATA>',
+      '<TALLYMESSAGE><GROUP><NAME>Current Liabilities</NAME></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><GROUP><NAME>Sundry Creditors</NAME><PARENT>Current Liabilities</PARENT></GROUP></TALLYMESSAGE>',
+      '<TALLYMESSAGE><LEDGER><NAME>Verma Electronics Wholesale</NAME><PARENT>Sundry Creditors</PARENT></LEDGER></TALLYMESSAGE>',
+      '<TALLYMESSAGE><VOUCHER><DATE>20240403</DATE><VOUCHERNUMBER>PU-C/001</VOUCHERNUMBER><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>',
+      '<PARTYLEDGERNAME>Verma Electronics Wholesale</PARTYLEDGERNAME><AMOUNT>246750</AMOUNT>',
+      '<ISCANCELLED>Yes</ISCANCELLED>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Purchase Account</LEDGERNAME><AMOUNT>-246750.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '<LEDGERENTRIES.LIST><LEDGERNAME>Verma Electronics Wholesale</LEDGERNAME><AMOUNT>246750.00</AMOUNT></LEDGERENTRIES.LIST>',
+      '</VOUCHER></TALLYMESSAGE>',
+      '</DATA></BODY></ENVELOPE>',
+    ].join('');
+    const r = await TallyImport.handleImport(co, xml);
+    assert.strictEqual(r.validation.errors.length, 0, JSON.stringify(r.validation.errors));
+    assert.strictEqual(r.imported.vouchers.imported, 1); // stored, not hidden
+    const v = await get('SELECT cancelled FROM tally_vouchers WHERE company_id = ? AND voucher_number = ?', [co, 'PU-C/001']);
+    assert.strictEqual(v.cancelled, 1);
+  });
+
   await check('validation: unbalanced voucher is rejected with a specific error, others import', async () => {
     const co = coId + '-balance';
     const xml = [

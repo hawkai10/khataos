@@ -22,7 +22,8 @@ function billRefsOf(entries) {
 // Index the imported Tally vouchers (ground truth for Tally-side activity)
 // plus the KhataOS references a BILLALLOCATIONS entry can tie to.
 async function loadTallyIndex(companyId) {
-  const vouchers = await all('SELECT * FROM tally_vouchers WHERE company_id = ?', [companyId]);
+  // Cancelled vouchers are stored for audit but are never recon candidates.
+  const vouchers = await all('SELECT * FROM tally_vouchers WHERE company_id = ? AND cancelled = 0', [companyId]);
   const parsed = vouchers.map((v) => {
     const entries = safeParse(v.entry_json);
     return { ...v, entries, billRefs: billRefsOf(entries) };

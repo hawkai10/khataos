@@ -51,6 +51,12 @@ async function check(name, fn) {
     entry_json: JSON.stringify([{ ledger: 'Verma Electronics Wholesale', amount: 5000, positive: false, bill_refs: ['NOPE-1'] }]),
     tally_guid: 'g-pu-2', tally_alterid: 1, imported_at: nowIso(),
   });
+  await insert('tally_vouchers', {
+    id: 'tv-3', company_id: co, voucher_number: 'PU-C', voucher_type: 'Purchase', date: '2024-04-06',
+    amount: 246750, party_name: 'Verma Electronics Wholesale',
+    entry_json: JSON.stringify([{ ledger: 'Verma Electronics Wholesale', amount: 246750, positive: false, bill_refs: ['CN-X'] }]),
+    tally_guid: 'g-pu-3', tally_alterid: 1, imported_at: nowIso(), cancelled: 1,
+  });
 
   await check('gst: tally purchase vouchers scanned against GSTR-2B', async () => {
     const mm = await GstDataProvider.scanMismatches(co, period);
@@ -59,6 +65,7 @@ async function check(name, fn) {
     assert.ok(byRef['PB/2024/558'].note.includes('amount differs'), byRef['PB/2024/558'].note);
     assert.ok(byRef['NOPE-1'], 'expected a not-reflected mismatch');
     assert.ok(byRef['NOPE-1'].note.includes('not yet reflected'), byRef['NOPE-1'].note);
+    assert.ok(!byRef['CN-X'], 'cancelled purchase voucher must not be scanned');
     assert.strictEqual(byRef['PB/2024/558'].vendor_gstin, '29AABCS2345K1Z2');
     const rows = await all('SELECT invoice_no, status FROM gst_mismatches WHERE company_id = ?', [co]);
     assert.strictEqual(rows.length, 2);

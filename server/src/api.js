@@ -311,7 +311,7 @@ function createRouter() {
   // imported): age buckets by voucher date vs today.
   r.get('/api/payables/aging', async (req, res, p, user) => {
     const coId = companyOf(user);
-    const rows = await all(`SELECT voucher_number, date, amount, party_name FROM tally_vouchers WHERE company_id = ? AND voucher_type = 'Purchase' ORDER BY date`, [coId]);
+    const rows = await all(`SELECT voucher_number, date, amount, party_name FROM tally_vouchers WHERE company_id = ? AND voucher_type = 'Purchase' AND cancelled = 0 ORDER BY date`, [coId]);
     const today = Date.parse(todayStr());
     const buckets = { current: 0, '31-60': 0, '61-90': 0, '90+': 0 };
     const items = [];

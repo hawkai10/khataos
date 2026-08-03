@@ -180,6 +180,17 @@ check('parse: BOM, XML declaration and missing ENVELOPE are tolerated', () => {
   assert.strictEqual(d.vouchers[0].amount, 1000); // explicit <AMOUNT> wins
 });
 
+check('parse: ISCANCELLED Yes flags cancelled; absent stays false', () => {
+  const xml = [
+    '<VOUCHER><DATE>20260701</DATE><VCHNUM>X-C</VCHNUM><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME><AMOUNT>1000</AMOUNT><ISCANCELLED>Yes</ISCANCELLED></VOUCHER>',
+    '<VOUCHER><DATE>20260702</DATE><VCHNUM>X-2</VCHNUM><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME><AMOUNT>2000</AMOUNT></VOUCHER>',
+  ].join('');
+  const d = Tally.parseExport(xml);
+  const byNum = Object.fromEntries(d.vouchers.map((v) => [v.voucher_number, v]));
+  assert.strictEqual(byNum['X-C'].cancelled, true);
+  assert.strictEqual(byNum['X-2'].cancelled, false); // absent tag -> not cancelled
+});
+
 check('parse: XML entities decoded (vendor names with &amp;)', () => {
   const xml = '<LEDGER><NAME>Sai Traders &amp; Co</NAME><PARENT>Sundry Creditors</PARENT></LEDGER>';
   const d = Tally.parseExport(xml);

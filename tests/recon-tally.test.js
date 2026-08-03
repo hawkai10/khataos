@@ -16,7 +16,7 @@ for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
 }
 
 const assert = require('assert');
-const { insert, all, get } = require('../server/src/db');
+const { insert, all, get, run } = require('../server/src/db');
 const recon = require('../server/src/recon');
 const { uid, todayStr, nowIso } = require('../server/src/util');
 
@@ -118,6 +118,23 @@ async function addVoucher(coId, number, type, amount, party, entries) {
     const txn = await get('SELECT matched FROM bank_transactions WHERE id = ?', ['txn-3']);
     assert.strictEqual(txn.matched, 1);
     assert.ok(stats.auto >= 1);
+  });
+
+  await check('cancelled voucher is stored but never offered as a recon candidate', async () => {
+    const co = 'rc-cancelled-' + Date.now();
+    await setup(co, 'Sundry Creditors - Sai Traders');
+    await addTxn(co, 'txn-4', -25000, 'R4');
+    await addVoucher(co, 'PY-C', 'Payment', 25000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Rent Expenses', amount: -25000, positive: true, bill_refs: [] },
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 25000, positive: false, bill_refs: [] },
+    ]);
+    await run('UPDATE tally_vouchers SET cancelled = 1 WHERE company_id = ?', [co]);
+    const stats = await recon.matchAll(co);
+    const m = await get('SELECT * FROM recon_matches WHERE bank_txn_id = ?', ['txn-4']);
+    assert.strictEqual(m, null, 'cancelled voucher must not match a bank transaction');
+    const txn = await get('SELECT matched FROM bank_transactions WHERE id = ?', ['txn-4']);
+    assert.strictEqual(txn.matched, 0);
+    assert.strictEqual(stats.auto, 0);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -236,6 +236,7 @@ async function importExport(companyId, data, rejectedVouchers = new Set()) {
       amount: v.amount,
       party_name: v.party_name,
       entry_json: JSON.stringify(v.entries),
+      cancelled: v.cancelled ? 1 : 0,
       imported_at: nowIso(),
     }),
   });

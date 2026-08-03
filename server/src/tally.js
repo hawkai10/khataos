@@ -21,6 +21,9 @@
 //                      resolve to the positive side)
 //   - identity:        <GUID> + <ALTERID> on masters/vouchers, used for
 //                      upsert (edit detection on re-export)
+//   - cancellation:    <ISCANCELLED>Yes</ISCANCELLED> marks a cancelled
+//                      voucher; the flag is stored for audit and excluded
+//                      from aging/recon/GST consumers (never from storage)
 //   - entries:         each entry also carries ISDEEMEDPOSITIVE (debit side)
 //                      and BILLALLOCATIONS.LIST references (Agst Ref)
 //   - entities:        &amp; etc. are decoded; BOM / missing <ENVELOPE>
@@ -193,6 +196,7 @@ function parseExport(xml) {
       entries,
       tally_guid: tag(clean, 'GUID') || null,
       tally_alterid: num(tag(clean, 'ALTERID')) || 0,
+      cancelled: /^yes$/i.test(tag(clean, 'ISCANCELLED') || ''),
     });
   }
   return out;

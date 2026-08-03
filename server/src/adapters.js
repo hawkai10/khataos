@@ -525,7 +525,7 @@ const GstDataProvider = {
     }
     // Tally-imported purchase vouchers are authoritative once imported:
     // compare their BILLALLOCATIONS invoice refs against the GSTR-2B rows.
-    const tallyVouchers = await all(`SELECT voucher_number, amount, party_name, entry_json FROM tally_vouchers WHERE company_id = ? AND voucher_type = 'Purchase'`, [companyId]);
+    const tallyVouchers = await all(`SELECT voucher_number, amount, party_name, entry_json FROM tally_vouchers WHERE company_id = ? AND voucher_type = 'Purchase' AND cancelled = 0`, [companyId]);
     const tallyLedgers = await all('SELECT name, gstin FROM tally_ledgers WHERE company_id = ?', [companyId]);
     const gstinByName = new Map(tallyLedgers.map((l) => [l.name, l.gstin]));
     const parseJson = (j) => { try { return JSON.parse(j || '[]'); } catch { return []; } };
