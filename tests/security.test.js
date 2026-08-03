@@ -1,6 +1,6 @@
 'use strict';
 
-// Tests for the security hardening:
+// Tests for the security hardening, exercised through the real Fastify app:
 //   - passwords are hashed with scrypt; legacy sha256:salt hashes still verify
 //   - a successful login upgrades a legacy hash to scrypt
 //   - login issues an HttpOnly SameSite=Strict session cookie and logout
@@ -20,8 +20,7 @@ for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
 const assert = require('assert');
 const { insert, get } = require('../server/src/db');
 const { hashPassword, verifyPassword, nowIso } = require('../server/src/util');
-const { currentUser } = require('../server/src/auth');
-const { createRouter } = require('../server/src/api');
+const { makeApp } = require('./helpers');
 
 let passed = 0, failed = 0;
 async function check(name, fn) {
@@ -29,17 +28,8 @@ async function check(name, fn) {
   catch (e) { failed++; console.log('  FAIL  ' + name + ' - ' + e.message); }
 }
 
-function invoke(router, method, routePath, req) {
-  return new Promise((resolve, reject) => {
-    const found = router.find(method, routePath);
-    const res = {
-      headers: {},
-      setHeader(k, v) { this.headers[k] = v; },
-      writeHead() {},
-      end(body) { resolve({ headers: this.headers, body: body ? JSON.parse(body) : null }); },
-    };
-    found.handler({ url: routePath, headers: req.headers || {}, body: req.body || {} }, res, found.params, req.user || null).catch(reject);
-  });
+async function login(app, email, password) {
+  return app.inject({ method: 'POST', url: '/api/auth/login', payload: JSON.stringify({ email, password }) });
 }
 
 (async () => {
@@ -49,6 +39,7 @@ function invoke(router, method, routePath, req) {
     id: 'u-sec', company_id: co, name: 'Sec User', email: 'sec@test.in',
     password: hashPassword('s3cret!'), role: 'cfo', department: 'Finance', active: 1, created_at: nowIso(),
   });
+  const app = await makeApp();
 
   await check('passwords: scrypt hash format round-trips', () => {
     const h = hashPassword('s3cret!');
@@ -64,10 +55,10 @@ function invoke(router, method, routePath, req) {
     assert.strictEqual(verifyPassword('nope', legacy), false);
   });
 
-  const router = createRouter();
   await check('auth: login sets an HttpOnly SameSite=Strict cookie', async () => {
-    const out = await invoke(router, 'POST', '/api/auth/login', { body: { email: 'sec@test.in', password: 's3cret!' } });
-    const cookie = out.headers['Set-Cookie'];
+    const res = await login(app, 'sec@test.in', 's3cret!');
+    assert.strictEqual(res.statusCode, 200);
+    const cookie = res.headers['set-cookie'];
     assert.ok(cookie && cookie.startsWith('khataos_session='), cookie);
     assert.ok(cookie.includes('HttpOnly'), cookie);
     assert.ok(cookie.includes('SameSite=Strict'), cookie);
@@ -75,10 +66,11 @@ function invoke(router, method, routePath, req) {
   });
 
   await check('auth: currentUser accepts the session cookie', async () => {
-    const out = await invoke(router, 'POST', '/api/auth/login', { body: { email: 'sec@test.in', password: 's3cret!' } });
-    const cookie = out.headers['Set-Cookie'].split(';')[0];
-    const user = await currentUser({ headers: { cookie } });
-    assert.ok(user && user.email === 'sec@test.in');
+    const res = await login(app, 'sec@test.in', 's3cret!');
+    const cookie = res.headers['set-cookie'].split(';')[0];
+    const me = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } });
+    assert.strictEqual(me.statusCode, 200);
+    assert.strictEqual(me.json().data.email, 'sec@test.in');
   });
 
   await check('auth: legacy hash is upgraded to scrypt on login', async () => {
@@ -88,18 +80,20 @@ function invoke(router, method, routePath, req) {
       id: 'u-legacy', company_id: co, name: 'Legacy User', email: 'legacy@test.in',
       password: legacy, role: 'finance_manager', department: 'Finance', active: 1, created_at: nowIso(),
     });
-    await invoke(router, 'POST', '/api/auth/login', { body: { email: 'legacy@test.in', password: 'oldpw' } });
+    const res = await login(app, 'legacy@test.in', 'oldpw');
+    assert.strictEqual(res.statusCode, 200);
     const row = await get('SELECT password FROM users WHERE id = ?', ['u-legacy']);
     assert.ok(row.password.startsWith('scrypt$'), row.password);
   });
 
   await check('auth: logout clears the session cookie', async () => {
-    const out = await invoke(router, 'POST', '/api/auth/login', { body: { email: 'sec@test.in', password: 's3cret!' } });
-    const cookie = out.headers['Set-Cookie'].split(';')[0];
-    const out2 = await invoke(router, 'POST', '/api/auth/logout', { headers: { cookie } });
-    assert.ok(out2.headers['Set-Cookie'].includes('Max-Age=0'), out2.headers['Set-Cookie']);
-    const user = await currentUser({ headers: { cookie } });
-    assert.strictEqual(user, null, 'cleared cookie must not authenticate');
+    const res = await login(app, 'sec@test.in', 's3cret!');
+    const cookie = res.headers['set-cookie'].split(';')[0];
+    const out = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { cookie } });
+    assert.strictEqual(out.statusCode, 200);
+    assert.ok(out.headers['set-cookie'].includes('Max-Age=0'), out.headers['set-cookie']);
+    const me = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } });
+    assert.strictEqual(me.statusCode, 401, 'cleared cookie must not authenticate');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

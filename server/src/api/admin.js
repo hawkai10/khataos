@@ -1,7 +1,7 @@
 'use strict';
 
-// Admin & platform domain: auth, users/audit, the finance dashboard, AI
-// assistant, onboarding, settings, metrics and system health.
+// Admin & platform domain (Fastify plugin): auth, users/audit, the finance
+// dashboard, AI assistant, onboarding, settings, metrics and system health.
 
 const { all, get, insert, run, update } = require('../db');
 const dbModule = require('../db');
@@ -19,41 +19,40 @@ const Invoices = require('../services/invoices');
 const { bodyOf, requireNonEmptyString } = require('./validators');
 const { companyOf } = require('./helpers');
 
-function register(r, deps) {
-  const { ok } = deps;
-
+async function register(fastify) {
   // ===================== AUTH =====================
-  r.post('/api/auth/login', async (req, res) => {
-    const { email, password } = bodyOf(req);
+  fastify.post('/api/auth/login', async (request, reply) => {
+    const { email, password } = bodyOf(request);
     if (!email || !password) throw new ApiError(400, 'email and password required');
     const data = await login(email, password);
-    res.setHeader('Set-Cookie', sessionCookie(data.token));
-    ok(res, data);
+    reply.header('Set-Cookie', sessionCookie(data.token));
+    reply.ok(data);
   });
 
-  r.post('/api/auth/logout', async (req, res) => {
-    const token = tokenFrom(req);
+  fastify.post('/api/auth/logout', async (request, reply) => {
+    const token = tokenFrom(request);
     if (token) await logout(token);
-    res.setHeader('Set-Cookie', clearSessionCookie());
-    ok(res, { loggedOut: true });
+    reply.header('Set-Cookie', clearSessionCookie());
+    reply.ok({ loggedOut: true });
   });
 
-  r.get('/api/me', async (req, res, p, user) => {
-    ok(res, publicUser(user));
+  fastify.get('/api/me', async (request, reply) => {
+    reply.ok(publicUser(request.user));
   });
 
-  r.get('/api/users', async (req, res, p, user) => {
+  fastify.get('/api/users', async (request, reply) => {
+    const user = request.user;
     requireRole(user, ['cfo']);
-    ok(res, await all('SELECT id, name, email, role, department, last_login_at FROM users WHERE company_id = ? ORDER BY role', [companyOf(user)]));
+    reply.ok(await all('SELECT id, name, email, role, department, last_login_at FROM users WHERE company_id = ? ORDER BY role', [companyOf(user)]));
   });
 
-  r.get('/api/audit', async (req, res, p, user) => {
-    ok(res, await recentAudit(companyOf(user), 100));
+  fastify.get('/api/audit', async (request, reply) => {
+    reply.ok(await recentAudit(companyOf(request.user), 100));
   });
 
   // ===================== DASHBOARD =====================
-  r.get('/api/dashboard', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.get('/api/dashboard', async (request, reply) => {
+    const coId = companyOf(request.user);
     const rw = await Cash.runway(coId);
     const available = rw.available;
     const accounts = rw.accounts;
@@ -70,7 +69,7 @@ function register(r, deps) {
     const trend = await Cash.cashTrend(coId, 30);
     const lastBankSync = await Cash.lastBankSync(coId);
 
-    ok(res, {
+    reply.ok({
       cash: { available, uncleared, accounts, runway_months: runwayMonths, monthly_burn: monthlyBurn, last_synced_at: lastBankSync },
       payments: { due_this_week: { count: due.length, amount: dueAmount }, overdue: { count: overdue.length, amount: overdueAmount } },
       gst: { itc: g.itc, liability: gstLiability, open_mismatches: mismatches, period: g.period, fetched_at: g.fetched_at },
@@ -89,54 +88,57 @@ function register(r, deps) {
   });
 
   // ===================== AI ASSISTANT =====================
-  r.get('/api/assistant/prompts', async (req, res) => {
-    ok(res, { prompts: Assistant.PROMPTS, status: Assistant.intent_status() });
+  fastify.get('/api/assistant/prompts', async (request, reply) => {
+    reply.ok({ prompts: Assistant.PROMPTS, status: Assistant.intent_status() });
   });
 
-  r.get('/api/assistant/suggestions', async (req, res, p, user) => {
-    ok(res, await Assistant.buildSuggestions(companyOf(user), user.role));
+  fastify.get('/api/assistant/suggestions', async (request, reply) => {
+    const user = request.user;
+    reply.ok(await Assistant.buildSuggestions(companyOf(user), user.role));
   });
 
-  r.post('/api/assistant/ask', async (req, res, p, user) => {
-    const question = requireNonEmptyString(bodyOf(req).question, 'question');
+  fastify.post('/api/assistant/ask', async (request, reply) => {
+    const user = request.user;
+    const question = requireNonEmptyString(bodyOf(request).question, 'question');
     await audit(companyOf(user), user, 'assistant.ask', 'assistant', null, { question: question.slice(0, 200) });
-    const answer = await Assistant.ask(user, question);
-    ok(res, answer);
+    reply.ok(await Assistant.ask(user, question));
   });
 
   // ===================== ONBOARDING =====================
-  r.get('/api/onboarding', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.get('/api/onboarding', async (request, reply) => {
+    const coId = companyOf(request.user);
     const rows = await all('SELECT * FROM onboarding_steps WHERE company_id = ?', [coId]);
     const order = ['connect_bank', 'install_tally', 'email_routing', 'vendor_import'];
     const steps = rows.sort((a, b) => order.indexOf(a.step) - order.indexOf(b.step));
-    ok(res, steps);
+    reply.ok(steps);
   });
 
-  r.post('/api/onboarding/:step/complete', async (req, res, p, user) => {
-    const coId = companyOf(user);
-    const existing = await get('SELECT * FROM onboarding_steps WHERE company_id = ? AND step = ?', [coId, p.step]);
+  fastify.post('/api/onboarding/:step/complete', async (request, reply) => {
+    const coId = companyOf(request.user);
+    const step = request.params.step;
+    const existing = await get('SELECT * FROM onboarding_steps WHERE company_id = ? AND step = ?', [coId, step]);
     if (existing) await run(`UPDATE onboarding_steps SET status = 'done', detail = ?, at = ? WHERE company_id = ? AND step = ?`,
-      [(req.body || {}).detail || existing.detail, nowIso(), coId, p.step]);
-    else await insert('onboarding_steps', { company_id: coId, step: p.step, status: 'done', detail: (req.body || {}).detail || null, at: nowIso() });
-    ok(res, { step: p.step, status: 'done' });
+      [(request.body || {}).detail || existing.detail, nowIso(), coId, step]);
+    else await insert('onboarding_steps', { company_id: coId, step, status: 'done', detail: (request.body || {}).detail || null, at: nowIso() });
+    reply.ok({ step, status: 'done' });
   });
 
   // ===================== SETTINGS & METRICS =====================
-  r.get('/api/settings', async (req, res, p, user) => {
-    ok(res, await Company.getSettings(companyOf(user)));
+  fastify.get('/api/settings', async (request, reply) => {
+    reply.ok(await Company.getSettings(companyOf(request.user)));
   });
 
-  r.put('/api/settings', async (req, res, p, user) => {
+  fastify.put('/api/settings', async (request, reply) => {
+    const user = request.user;
     requireRole(user, ['cfo']);
     const coId = companyOf(user);
-    const next = await Company.saveSettings(coId, bodyOf(req));
+    const next = await Company.saveSettings(coId, bodyOf(request));
     await audit(coId, user, 'settings.updated', 'company', coId, next);
-    ok(res, next);
+    reply.ok(next);
   });
 
-  r.get('/api/metrics', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.get('/api/metrics', async (request, reply) => {
+    const coId = companyOf(request.user);
     const score = await recon.score(coId);
     const completedPayments = await all(`SELECT * FROM payments WHERE company_id = ? AND status = 'completed' AND processed_at IS NOT NULL ORDER BY processed_at DESC LIMIT 30`, [coId]);
     // engine-agnostic: first invoice id per payment -> received date
@@ -161,7 +163,7 @@ function register(r, deps) {
     const usage = await get('SELECT * FROM usage_daily WHERE company_id = ? AND date = ?', [coId, today]);
     const dau = usage ? usage.dau : 0;
     const tally = await TallyConnector.health(coId);
-    ok(res, {
+    reply.ok({
       customers: { paying: 12, pipeline: 21, target: 100, acv_inr: 300000, retention_6m: 92 },
       banks: { connected: 17, target: 15 },
       tally_uptime: tally.uptime_30d, target_uptime: 99.5,
@@ -172,8 +174,8 @@ function register(r, deps) {
   });
 
   // ===================== SYSTEM HEALTH =====================
-  r.get('/api/system/health', async (req, res, p, user) => {
-    const coId = companyOf(user);
+  fastify.get('/api/system/health', async (request, reply) => {
+    const coId = companyOf(request.user);
     const startedAt = process.env.KHATAOS_STARTED_AT || new Date(Date.now() - process.uptime() * 1000).toISOString();
     const tables = await dbModule.listTables();
     const rowCounts = {};
@@ -190,7 +192,7 @@ function register(r, deps) {
     const tally = await TallyConnector.health(coId);
     const gstSnap = await get('SELECT period, fetched_at FROM gstr2b_snapshots WHERE company_id = ? ORDER BY period DESC LIMIT 1', [coId]);
     const bankAccounts = (await all('SELECT source, COUNT(*) AS c FROM bank_accounts WHERE company_id = ? GROUP BY source', [coId])).map((r) => ({ source: r.source, count: r.c }));
-    ok(res, {
+    reply.ok({
       app: { name: 'KhataOS', version: '0.1.0 (MVP)', started_at: startedAt, uptime_seconds: Math.round(process.uptime()), node: process.version },
       database: {
         engine: dbModule.DB_ENGINE,

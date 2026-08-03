@@ -15,8 +15,8 @@ for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
 
 const assert = require('assert');
 const { insert } = require('../server/src/db');
-const { createRouter } = require('../server/src/api');
-const { uid, nowIso } = require('../server/src/util');
+const { hashPassword, uid, nowIso } = require('../server/src/util');
+const { makeApp, createSession } = require('./helpers');
 
 let passed = 0, failed = 0;
 async function check(name, fn) {
@@ -24,19 +24,15 @@ async function check(name, fn) {
   catch (e) { failed++; console.log('  FAIL  ' + name + ' - ' + e.message); }
 }
 
-function invoke(handler, params, user) {
-  return new Promise((resolve, reject) => {
-    const res = {
-      writeHead() {},
-      end(body) { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } },
-    };
-    handler({ url: '/api/payables/aging', headers: {}, body: {} }, res, params, user).catch(reject);
-  });
-}
-
 (async () => {
   const co = 'aging-' + Date.now();
   await insert('companies', { id: co, name: 'Aging Co', gstin: '29ABCDE1234F1Z5', created_at: nowIso() });
+  await insert('users', {
+    id: 'u-aging', company_id: co, name: 'Aging CFO', email: 'cfo@aging.in',
+    password: hashPassword('pw'), role: 'cfo', department: 'Finance', active: 1, created_at: nowIso(),
+  });
+  const auth = await createSession('u-aging');
+  const app = await makeApp();
   await insert('tally_vouchers', {
     id: uid('tv'), company_id: co, voucher_number: 'PU-1', voucher_type: 'Purchase', date: '2026-01-15',
     amount: 100000, party_name: 'Vendor A', entry_json: '[]', tally_guid: 'g-aging-1', tally_alterid: 1,
@@ -49,9 +45,9 @@ function invoke(handler, params, user) {
   });
 
   await check('payables aging: cancelled purchase vouchers are excluded from totals', async () => {
-    const router = createRouter();
-    const found = router.find('GET', '/api/payables/aging');
-    const out = await invoke(found.handler, found.params, { company_id: co, role: 'cfo' });
+    const res = await app.inject({ method: 'GET', url: '/api/payables/aging', headers: auth });
+    assert.strictEqual(res.statusCode, 200);
+    const out = res.json();
     assert.strictEqual(out.data.items.length, 1);
     assert.strictEqual(out.data.items[0].voucher_number, 'PU-1');
     assert.strictEqual(out.data.items[0].amount, 100000);
@@ -65,9 +61,9 @@ function invoke(handler, params, user) {
   });
 
   await check('payables aging: Debit Notes net against the same vendor purchase', async () => {
-    const router = createRouter();
-    const found = router.find('GET', '/api/payables/aging');
-    const out = await invoke(found.handler, found.params, { company_id: co, role: 'cfo' });
+    const res = await app.inject({ method: 'GET', url: '/api/payables/aging', headers: auth });
+    assert.strictEqual(res.statusCode, 200);
+    const out = res.json();
     assert.strictEqual(out.data.items.length, 1);
     assert.strictEqual(out.data.items[0].amount, 80000);
     assert.strictEqual(out.data.total, 80000); // 100,000 purchase - 20,000 Debit Note

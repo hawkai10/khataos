@@ -31,9 +31,9 @@ legacy.close();
 process.env.KHATAOS_DB = TEST_DB;
 
 const assert = require('assert');
-const { all, get, run } = require('../server/src/db');
-const { createRouter } = require('../server/src/api');
-const { nowIso } = require('../server/src/util');
+const { all, get, run, insert } = require('../server/src/db');
+const { hashPassword, nowIso } = require('../server/src/util');
+const { makeApp, createSession } = require('./helpers');
 
 let passed = 0, failed = 0;
 async function check(name, fn) {
@@ -41,17 +41,15 @@ async function check(name, fn) {
   catch (e) { failed++; console.log('  FAIL  ' + name + ' - ' + e.message); }
 }
 
-function invoke(handler, params, user) {
-  return new Promise((resolve, reject) => {
-    const res = {
-      writeHead(code, headers) { this.code = code; },
-      end(body) { try { resolve({ code: this.code, body: JSON.parse(body) }); } catch (e) { reject(e); } },
-    };
-    handler({ url: '/api/invoices/capture', headers: {}, body: {} }, res, params, user).catch(reject);
-  });
-}
-
 (async () => {
+  await insert('companies', { id: 'co1', name: 'Legacy Co', gstin: '29ABCDE1234F1Z5', created_at: nowIso() });
+  await insert('users', {
+    id: 'u1', company_id: 'co1', name: 'Exec', email: 'exec@mig.test',
+    password: hashPassword('pw'), role: 'finance_executive', department: 'Finance', active: 1, created_at: nowIso(),
+  });
+  const auth = await createSession('u1');
+  const app = await makeApp();
+
   await check('migration: duplicate invoices are deduped, keeping the earliest', async () => {
     const rows = await all('SELECT id FROM invoices WHERE company_id = ?', ['co1']);
     assert.strictEqual(rows.length, 1, JSON.stringify(rows));
@@ -77,15 +75,11 @@ function invoke(handler, params, user) {
   });
 
   await check('api: capture route rejects a duplicate invoice number with 409', async () => {
-    const router = createRouter();
-    const found = router.find('POST', '/api/invoices/capture');
-    const user = { id: 'u1', company_id: 'co1', role: 'finance_executive', name: 'Exec' };
-    const req = { url: '/api/invoices/capture', headers: {}, body: { invoice_no: 'INV-1', taxable_amount: 1000, cgst: 90, sgst: 90, igst: 0, gross_amount: 1180 } };
-    let status = null;
-    try {
-      await found.handler(req, { writeHead() {}, end() {} }, found.params, user);
-    } catch (e) { status = e.status; }
-    assert.strictEqual(status, 409, 'expected 409 for duplicate invoice_no');
+    const res = await app.inject({
+      method: 'POST', url: '/api/invoices/capture', headers: auth,
+      payload: JSON.stringify({ invoice_no: 'INV-1', taxable_amount: 1000, cgst: 90, sgst: 90, igst: 0, gross_amount: 1180 }),
+    });
+    assert.strictEqual(res.statusCode, 409, 'expected 409 for duplicate invoice_no: ' + res.body.slice(0, 120));
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

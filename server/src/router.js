@@ -9,7 +9,7 @@ class Router {
   add(method, pattern, handler) {
     const keys = [];
     const rx = new RegExp('^' + pattern.replace(/:[^/]+/g, (m) => { keys.push(m.slice(1)); return '([^/]+)'; }) + '$');
-    this.routes.push({ method, rx, keys, handler });
+    this.routes.push({ method, pattern, rx, keys, handler });
   }
   get(p, h) { this.add('GET', p, h); }
   post(p, h) { this.add('POST', p, h); }

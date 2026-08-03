@@ -1,30 +1,43 @@
 'use strict';
 
 // ============================================================================
-// API composition root. Route handlers live in domain routers under src/api/
-// (cash, invoices, payments, gst, tally, admin); shared request validation
-// lives in src/api/validators.js; repeated SQL lives in src/services/*. This
-// file only mounts the domains and re-exports the shared primitives.
+// API composition root for the Fastify migration. Domain modules start on the
+// legacy Router (createRouter) and move into CONVERTED one at a time; each
+// converted module exposes a Fastify plugin (`register(fastify)`) mounted by
+// registerDomains. During the transition the server runs both: converted
+// modules via Fastify, the rest via the legacy bridge in src/http/app.js.
 // ============================================================================
 
 const { Router, ok } = require('./router');
+const admin = require('./api/admin');
 const cash = require('./api/cash');
+const gst = require('./api/gst');
 const invoices = require('./api/invoices');
 const payments = require('./api/payments');
-const gst = require('./api/gst');
 const tally = require('./api/tally');
-const admin = require('./api/admin');
 
-function createRouter() {
+const ALL_MODULES = { admin, cash, gst, invoices, payments, tally };
+
+// Modules already migrated to Fastify plugins (order matters). The legacy
+// bridge excludes these; createRouter() without an explicit exclude still
+// returns every module so the in-process unit-test harness keeps working
+// during the transition.
+const CONVERTED = ['admin'];
+
+function createRouter({ exclude = [] } = {}) {
   const r = new Router();
   const deps = { ok };
-  cash.register(r, deps);
-  invoices.register(r, deps);
-  payments.register(r, deps);
-  gst.register(r, deps);
-  tally.register(r, deps);
-  admin.register(r, deps);
+  for (const [name, mod] of Object.entries(ALL_MODULES)) {
+    if (exclude.includes(name)) continue;
+    mod.register(r, deps);
+  }
   return r;
 }
 
-module.exports = { createRouter, ok, Router };
+async function registerDomains(fastify) {
+  for (const name of CONVERTED) {
+    await ALL_MODULES[name].register(fastify);
+  }
+}
+
+module.exports = { createRouter, registerDomains, CONVERTED, ok, Router };
