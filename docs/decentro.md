@@ -2,9 +2,9 @@
 
 KhataOS can fetch **real bank balances and statements** through
 [Decentro](https://www.decentro.tech/)'s Connected Banking module (Business
-Accounts), instead of the simulated feed. Decentro aggregates multiple Indian
-banks behind one API, which fits the MVP's "connect the first bank in 15
-minutes" goal and lets one integration cover many banks.
+Accounts). Decentro aggregates multiple Indian banks behind one API, which
+fits the MVP's "connect the first bank in 15 minutes" goal and lets one
+integration cover many banks.
 
 ## How it fits the architecture
 
@@ -15,10 +15,10 @@ KhataOS API ──► Decentro Connected Banking ──► linked bank account
                   headers: client_id · client_secret · module_secret · provider_secret
 ```
 
-The adapter lives in `server/src/decentro.js` and implements the same
-provider interface as the simulator. It **activates automatically when the
-environment variables below are set**; without them the product falls back to
-the deterministic demo feed, so the repo always runs.
+The adapter lives in `server/src/decentro.js` and talks directly to
+Decentro's real API. It **activates automatically when the environment
+variables below are set**; without them the endpoints report `503` and no
+data is fabricated.
 
 ## Configuration
 

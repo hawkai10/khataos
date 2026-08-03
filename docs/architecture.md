@@ -90,32 +90,32 @@ In production these queues become SQS topics; handlers stay identical. The UI
 never blocks on an adapter call — it polls status, exactly like the real
 product will.
 
-## 5. Adapter interfaces (real vs simulated)
+## 5. Adapter interfaces (real-only)
 
 Each adapter exposes a provider-agnostic interface and a `MOCK` implementation.
-Replacing a simulator = implementing the same interface against the provider
-SDK and flipping a config flag.
+Adapters only talk to real providers. An unconfigured provider refuses with
+`503` (see `server/src/config.js`); the CI gateway double (`PAYMENT_GATEWAY=test`)
+only transitions payment status and never fabricates bank data.
 
-| Adapter | Interface | Real provider (Phase 1) | Simulator behavior |
+| Adapter | Interface | Real provider (Phase 1) | Unconfigured behavior |
 | --- | --- | --- | --- |
-| `BankDataProvider` | `startConsent`, `listAccounts`, `fetchTransactions`, `refresh` | **Decentro Connected Banking** (balance + statement, many banks via one API) as primary AIS; Sahamati AA (FIU) and ICICI/HDFC corporate APIs as alternates | Generates realistic 90-day transaction history per account with Indian modes/narrations |
-| `PaymentGateway` | `createBatch`, `schedule`, `execute`, `status`, `webhook` | RazorpayX, then Cashfree | Async lifecycle, deterministic ~4% failure for demo, UTR generation |
-| `TallyConnector` | `syncVouchers`, `createVoucher`, `queue`, `health`, `installer` | Windows service over Tally ODBC + XML export (TallyPrime ≥ 2.1) | Simulated ledger/voucher sync, single-user queueing, health pings |
+| `BankDataProvider` | `startConsent`, `listAccounts`, `fetchTransactions`, `refresh` | **Decentro Connected Banking** (balance + statement, many banks via one API) as primary AIS; Sahamati AA (FIU) and ICICI/HDFC corporate APIs as alternates | 503 until AA/direct credentials are configured (TODO(real-aa)) |
+| `PaymentGateway` | `createBatch`, `schedule`, `execute`, `status`, `webhook` | RazorpayX, then Cashfree | 503 until RazorpayX credentials; `PAYMENT_GATEWAY=test` CI double |
+| `TallyConnector` | `syncVouchers`, `createVoucher`, `queue`, `health`, `installer` | Windows service over Tally ODBC + XML export (TallyPrime ≥ 2.1) | Queued async sync log + health pings over the file-based XML path |
 | `OcrEngine` | `extractInvoice(image/pdf/text)` | Document AI / custom model trained on Indian GST invoice formats | Rule+keyword extraction for Indian invoices: GSTIN, HSN, CGST/SGST/IGST, bilingual narrations |
-| `GstDataProvider` | `fetchGstr2b`, `scanMismatches`, `exportReturn` | GSP/GSTN taxpayer API (GSTR-2B `b2b` fetch) + e-invoice IRP (IRN generation), implemented in `server/src/gstn.js` | Deterministic GSP-shaped GSTR-2B payload with injected mismatches for demo |
+| `GstDataProvider` | `fetchGstr2b`, `scanMismatches`, `exportReturn` | GSP/GSTN taxpayer API (GSTR-2B `b2b`/`cdnr` fetch) + e-invoice IRP (IRN generation), implemented in `server/src/gstn.js` | 503 until `GSTN_*` credentials are configured |
 
 The Decentro adapter (`server/src/decentro.js`) is live API code, not a stub:
 it calls Decentro's `/v2/banking/account/{acc}/balance` and `/statement`
 endpoints with header auth and maps responses into the same transaction model.
-It activates when `DECENTRO_*` env vars are present and gracefully falls back
-to the simulator otherwise (see `docs/decentro.md`).
+It activates when `DECENTRO_*` env vars are present and otherwise reports as
+not configured (see `docs/decentro.md`).
 
 The GSTN adapter (`server/src/gstn.js`) is likewise live API code: it models
 the GSP taxpayer-API contract (OTP request â†’ `AUTHTOKEN` â†’ GSTR-2B fetch) and
 the e-invoice IRP `generate` call, and delegates the platform's GSTR-2B
-refresh through it. It activates when `GSTN_*` env vars are present (unless
-`GSTN_MOCK=1`) and otherwise generates a realistic GSP-shaped payload from the
-platform's invoices so the mismatch pipeline runs identically (see
+refresh through it. It activates when `GSTN_*` env vars are present and
+otherwise refuses with `503` - no simulated GSTR-2B payloads exist (see
 `docs/gstn.md`).
 
 ## 6. TallyPrime connector
@@ -128,7 +128,9 @@ is free; the sync health dashboard reflects queue depth and last success.
 
 ## 7. Security, RBAC, audit
 
-- Passwords hashed (SHA-256 + salt in demo; bcrypt/Argon2 + OAuth2 in prod).
+- Passwords hashed with scrypt (legacy sha256+salt rows upgrade on first
+  login); sessions are httpOnly SameSite=Strict cookies for browsers, with
+  the Authorization header retained for API clients.
 - Roles: `cfo` (admin), `finance_manager`, `finance_executive` with
   per-route permission checks and threshold rules:
   - Invoices > ₹1,00,000 require CFO approval (configurable per tenant).

@@ -22,16 +22,21 @@ const BASE = `http://localhost:${PORT}`;
 
 if (process.argv.includes('--pg')) {
   process.env.KHATAOS_DB_ENGINE = 'pglite';
+  // pglite is single-process: all test data is created inside the server via
+  // the guarded test hooks, so the child keeps its own in-memory database.
   delete process.env.KHATAOS_PGLITE_DIR;
   console.log('DB engine: in-process PostgreSQL (pglite)');
 } else {
   console.log('DB engine: SQLite');
 }
 
-// fresh test DB (explicit path shared with the server child) + CI gateway double
+// fresh test DB (explicit path shared with the server child) + CI gateway
+// double + guarded test hooks that create data inside the server process.
 const TEST_DB = path.join(process.env.TEMP || os.tmpdir(), 'khataos-data', 'smoke-' + process.pid + '.db');
 process.env.KHATAOS_DB = TEST_DB;
 process.env.PAYMENT_GATEWAY = 'test';
+process.env.KHATAOS_TEST_HOOKS = '1';
+process.env.KHATAOS_TEST_TENANT = '1';
 for (const suffix of ['', '-wal', '-shm']) {
   try { fs.rmSync(TEST_DB + suffix, { force: true }); } catch { /* ignore */ }
 }
@@ -71,31 +76,12 @@ async function waitForServer(proc, ms = 20000) {
 }
 
 (async () => {
-  // ---- bootstrap a minimal real tenant (test harness, not product code) ----
-  const { seedIfEmpty } = require('../server/src/seed');
-  const db = require('../server/src/db');
-  const { hashPassword, uid, nowIso, todayStr } = require('../server/src/util');
-  await seedIfEmpty();
-  const coId = 'co_smoke';
-  const today = todayStr();
-  await db.insert('companies', { id: coId, name: 'Smoke Test Co', gstin: '29ABCDE1234F1Z5', pan: 'ABCDE1234F', city: 'Bengaluru', plan: 'standard', settings: JSON.stringify({ payment_approval_threshold: 500000 }), created_at: nowIso() });
-  for (const u of [
-    { id: 'u_cfo', name: 'CFO Smoke', email: 'cfo@smoke.in', role: 'cfo' },
-    { id: 'u_mgr', name: 'Mgr Smoke', email: 'manager@smoke.in', role: 'finance_manager' },
-    { id: 'u_exec', name: 'Exec Smoke', email: 'exec@smoke.in', role: 'finance_executive' },
-  ]) {
-    await db.insert('users', { id: u.id, company_id: coId, name: u.name, email: u.email, password: hashPassword('test1234'), role: u.role, department: 'Finance', active: 1, created_at: nowIso() });
-  }
-  await db.insert('vendors', { id: 'v_smoke', company_id: coId, name: 'Smoke Vendor Traders', gstin: '29ABCDE1234F1Z5', ledger_name: 'Sundry Creditors - Smoke Vendor', tds_section: '194C', tds_rate: 0.02, credit_days: 30, active: 1 });
-  await db.insert('bank_accounts', { id: 'acc_smoke', company_id: coId, bank_code: 'HDFC', account_name: 'HDFC Current', account_number: '502100000001', type: 'current', ifsc: 'HDFC0001234', status: 'active', source: 'direct_api', opened_at: today, last_synced_at: nowIso() });
-  await db.insert('cash_daily', { id: uid('cd'), company_id: coId, account_id: 'acc_smoke', date: today, closing_balance: 2500000, source: 'direct_api' });
-  await db.insert('bank_transactions', { id: 'btx_unmatched', company_id: coId, account_id: 'acc_smoke', external_id: 'BTX-1', txn_date: today, amount: -25000, description: 'NEFT OFFICE SUPPLIES', mode: 'NEFT', ref_no: 'NEFT-UNMATCHED', status: 'posted', matched: 0, created_at: nowIso() });
-  for (const [step, detail] of [['connect_bank', 'linked'], ['install_tally', 'installed'], ['email_routing', 'active'], ['vendor_import', 'imported']]) {
-    await db.insert('onboarding_steps', { company_id: coId, step, status: 'done', detail, at: nowIso() });
-  }
+  // The server child bootstraps the minimal test tenant itself (guarded test
+  // hooks) so both SQLite and single-process pglite see the same data.
+  const today = new Date().toISOString().slice(0, 10);
 
   const server = spawn(process.execPath, ['server/src/server.js'], {
-    cwd: ROOT, env: { ...process.env, PORT: String(PORT), PAYMENT_GATEWAY: 'test' }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: ROOT, env: { ...process.env, PORT: String(PORT), PAYMENT_GATEWAY: 'test', KHATAOS_TEST_HOOKS: '1', KHATAOS_TEST_TENANT: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let serverLog = '';
   server.stdout.on('data', (d) => { serverLog += d; });
@@ -187,11 +173,11 @@ async function waitForServer(proc, ms = 20000) {
 
     // ---- BANK CHANNEL: statement row for the executed payment, then recon ----
     const payRow = await api('GET', `/api/payments/${createdPay.id}`, null, cfo);
-    await db.insert('bank_transactions', {
-      id: 'btx_payment', company_id: coId, account_id: 'acc_smoke', external_id: 'BTX-PAY-1', txn_date: today,
+    await api('POST', '/api/_test/bank-txn', {
+      id: 'btx_payment', external_id: 'BTX-PAY-1', txn_date: today,
       amount: -payRow.net_amount, description: `IMPS/OUTWARD ${payRow.reference}`, mode: 'IMPS',
-      ref_no: payRow.reference, status: 'posted', matched: 0, created_at: nowIso(),
-    });
+      ref_no: payRow.reference,
+    }, mgr);
     const recon = await api('POST', '/api/recon/run', {}, mgr);
     check('recon: matcher returns stats', recon.total > 0);
     check('recon: payment debit matched by reference', recon.score.accuracy > 0, `got ${recon.score.accuracy}%`);
@@ -212,12 +198,7 @@ async function waitForServer(proc, ms = 20000) {
 
     // ---- GST CHANNEL: snapshot like a real GSP fetch would store ----
     const period = today.slice(0, 7);
-    await db.insert('gstr2b_snapshots', {
-      id: 'g2b_smoke', company_id: coId, period, gstin: '29ABCDE1234F1Z5',
-      total_itc: 0, itc_cgst: 0, itc_sgst: 0, itc_igst: 0,
-      data_json: JSON.stringify([]), cdnr_json: JSON.stringify([]),
-      source: 'gstn-live', fetched_at: nowIso(),
-    });
+    await api('POST', '/api/_test/gstr2b', { period, data_json: [], cdnr_json: [] }, cfo);
     const gstSummary = await api('GET', '/api/gst/summary', null, cfo);
     check('gst: summary exposes snapshot period', gstSummary.period === period, gstSummary.period);
     const csvResp = await fetch(BASE + `/api/gst/export?type=gstr3b&period=${period}`, { headers: { authorization: 'Bearer ' + cfo } });

@@ -20,6 +20,13 @@ const HAS_FRONTEND = fs.existsSync(path.join(FRONTEND_DIST, 'index.html'));
 
 const router = createRouter();
 
+// Test-only hooks (E2E suite). Never enabled unless explicitly requested via
+// KHATAOS_TEST_HOOKS / KHATAOS_TEST_TENANT.
+if (process.env.KHATAOS_TEST_HOOKS === '1') {
+  const { installTestHooks } = require('./test-hooks');
+  installTestHooks(router);
+}
+
 // ---- structured request log + in-memory rate limiter ----
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_LIMITS = new Map();
@@ -150,6 +157,10 @@ const server = http.createServer(async (req, res) => {
 
 (async () => {
   await seedIfEmpty();
+  if (process.env.KHATAOS_TEST_TENANT === '1') {
+    const { bootstrapTestTenant } = require('./test-hooks');
+    await bootstrapTestTenant();
+  }
   server.listen(PORT, () => {
     console.log(`KhataOS MVP running: http://localhost:${PORT}`);
     console.log('Reference data seeded. No demo tenant is created — data only arrives through the real channels (Tally XML, bank statements, GSTR-2B, forwarded invoices).');

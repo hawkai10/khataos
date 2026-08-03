@@ -75,5 +75,5 @@ mobile apps, supply chain finance, drill-down reporting.
 All money in INR, Indian date formats, realistic narrations ("NEFT NACH",
 "UPI/XYZ123456789", "CHQ NO 778812"), GSTINs of form `29AABCA1234F1Z5`,
 10-digit HSN codes, TDS sections (194C contractor, 194J professional,
-194H commission). Current date in the demo follows the system clock, so
-overdue/due states always look real.
+194H commission). Dates follow the system clock, so overdue/due states stay
+real as data is entered.

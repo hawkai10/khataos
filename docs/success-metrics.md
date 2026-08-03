@@ -22,13 +22,12 @@ simulated baselines in this MVP.
 - **Recon accuracy** = matched bank transactions ÷ total bank transactions in
   the window, split by automatic (exact/fuzzy/combined) vs manual.
 - **Cycle time** = days from invoice capture to payment completion, averaged
-  over the last 30 days, compared against a seeded "manual baseline" of
-  11.2 days for the demo tenant.
+  over the last 30 days, compared against a fixed "manual baseline" of
+  11.2 days.
 - **DAU/MAU** = distinct users with sessions on the day / distinct users in
-  the month. The demo seeds a 30-day login history; real logins from this
-  dashboard update it.
+  the month. Real logins update it; there is no seeded login history.
 - **Tally uptime** = successful sync heartbeats ÷ expected heartbeats over 30
-  days (simulated with realistic 99.6–99.8% pattern).
+  days, computed from connector heartbeats (starts at 100%).
 
 ## North-star framing
 

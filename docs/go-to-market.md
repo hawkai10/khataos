@@ -21,7 +21,7 @@ Sign up → Verify GSTIN → Connect bank via AA consent (OTP) → Cash visible
 ```
 
 The product tracks onboarding step completion in-app; the Onboarding page in
-this MVP implements the same flow with the simulator.
+this MVP implements the same flow against the real APIs.
 
 ## 30-day value plan
 

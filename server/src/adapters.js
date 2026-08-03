@@ -181,13 +181,15 @@ const TallyConnector = {
 
   async heartbeat(companyId) {
     const h = await get('SELECT * FROM tally_health WHERE company_id = ?', [companyId]);
-    const uptime = h && h.uptime_30d != null ? h.uptime_30d : 99.72;
+    // Uptime starts at 100% (no fabricated baseline) and converges back up
+    // after any reported downtime.
+    const uptime = h && h.uptime_30d != null ? h.uptime_30d : 100;
     const now = nowIso();
     if (h) {
       await run(`UPDATE tally_health SET last_sync_at = ?, last_success_at = ?, status = 'connected', uptime_30d = ? WHERE company_id = ?`,
-        [now, now, Math.min(99.9, inr(uptime + 0.001)), companyId]);
+        [now, now, Math.min(100, inr(uptime + 0.001)), companyId]);
     } else {
-      await insert('tally_health', { company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 99.72 });
+      await insert('tally_health', { company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 100 });
     }
   },
 

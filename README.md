@@ -10,10 +10,10 @@ This repository contains the **runnable MVP**: a Node.js backend (SQLite via
 `node:sqlite`) and a **React + Tailwind + shadcn-style UI** (Vite build in
 `webapp/`) with a zero-dependency legacy SPA fallback in `web/`. All external
 integrations (Account Aggregator, ICICI/HDFC direct APIs, RazorpayX/Cashfree,
-TallyPrime, GSTN) are implemented behind real adapter interfaces with
-**simulated adapters** preloaded, so the entire product can be demonstrated
-end-to-end without credentials. Swapping a simulator for the real provider is
-a contained change (see `docs/architecture.md`).
+TallyPrime, GSTN) sit behind real adapter interfaces and activate when their
+credentials are configured (see `.env.example`). Nothing is simulated: an
+unconfigured provider refuses with `503` instead of fabricating data, so the
+platform only ever holds real information (see `docs/architecture.md`).
 
 ---
 
@@ -38,13 +38,13 @@ cd khataos
 node server/src/server.js
 ```
 
-Open <http://localhost:8080> and log in with one of the demo users:
+Open <http://localhost:8080> and log in with the users you provision for your
+company. The database starts empty apart from the supported bank directory.
 
 ### Real bank data via Decentro (optional)
 
-The MVP ships with realistic simulated bank feeds so the whole product can be
-demoed offline. To fetch **real** balances and statements, set Decentro
-Connected Banking credentials (sandbox or live) and restart:
+To fetch **real** balances and statements, set Decentro Connected Banking
+credentials (sandbox or live) and restart:
 
 ```powershell
 $env:DECENTRO_CLIENT_ID = "…"; $env:DECENTRO_CLIENT_SECRET = "…"
@@ -54,15 +54,14 @@ node server/src/server.js
 
 Then **Cash & Banks → Connect a bank → Decentro Connected Banking**. Full
 guide, endpoints, and mapping: [docs/decentro.md](docs/decentro.md). Without
-these vars the app uses the simulator and reports Decentro as "not
-configured".
+these vars the endpoints report Decentro as "not configured" (503) and no
+data is fabricated.
 
 ### Real GST data via a GSTN/GSP (optional)
 
-The GST module ships with a deterministic GSTR-2B simulator (GSP-shaped
-payload built from the platform's own invoices, with injected mismatches so
-the ITC scan always has real flags). To fetch **real** GSTR-2B data, set the
-tenant's GSTN/GSP credentials and restart:
+To fetch **real** GSTR-2B data, set the tenant's GSTN/GSP credentials and
+restart; until then `/api/gst/refresh` refuses with 503 (no simulated
+GSTR-2B payloads exist):
 
 ```powershell
 $env:GSTN_GSTIN = "your-gstin"
@@ -127,28 +126,23 @@ $env:KHATAOS_DB_ENGINE = "pglite"; node server/src/server.js
 $env:KHATAOS_DATABASE_URL = "postgres://…"; node server/src/server.js
 ```
 
-Both smoke suites run green — SQLite and PostgreSQL (in-process) — via
-`node tests/smoke.js` and `node tests/smoke.js --pg`.
+## Verification
 
-Reset the demo at any time by deleting `server/data/khataos.db` and restarting.
+The full suite runs green on SQLite and in-process PostgreSQL:
 
-## 2-minute demo script
+```powershell
+# unit + integration tests (parse, import, recon, GST, security, migrations, fuzz)
+node tests\tally.test.js
+node tests\recon-three-way.test.js
+node tests\recon-three-way.test.js --pg
+node tests\smoke.js
+node tests\smoke.js --pg
+```
 
-1. **CFO dashboard** — the four morning questions: cash, due payments, GST
-   risk, runway.
-2. **Cash** — 6 accounts, live balances, uncleared funds, 30-day trend,
-   "Connect a bank" (simulated AA consent flow, ~15-minute onboarding
-   promise).
-3. **Payables** — capture an invoice (simulated email forward / upload / manual),
-   watch OCR extract Indian fields, approve (see the ₹1L CFO rule trigger),
-   three-way match with Tally PO/receipt data.
-4. **Payments** — schedule a batch (NEFT/IMPS/UPI/RTGS), watch the gateway
-   simulator move it pending → processing → completed, with GST ledger and
-   TDS tagging.
-5. **Reconciliation** — auto-match score, review unmatched, manual match.
-6. **GST** — ITC position, liabilities from approved invoices, GSTR-2B
-   mismatches, export CSV for ClearTax/Tally.
-7. **Tally** — integration health, sync queue, voucher creation on approval.
+`tests/recon-three-way.test.js` pushes data of different types through all
+three channels (Tally XML, bank statements, GSTR-2B) and asserts the
+reconciliation results; `tests/smoke.js` bootstraps a minimal tenant and
+exercises every module end-to-end with real pipeline data.
 
 ## Repository map
 
@@ -162,8 +156,8 @@ khataos/
       db.js        SQLite schema (node:sqlite), migrations
       decentro.js  Decentro Connected Banking adapter (real API)
       gstn.js      GSP/GSTN adapter (GSTR-2B fetch + e-invoice IRN contract)
-      seed.js      deterministic demo data generator
-      adapters.js  integration adapters (simulated): AA, bank APIs, gateway,
+      seed.js      reference-data seed (supported bank directory)
+      adapters.js  integration adapters (real-only): AA, bank APIs, gateway,
                    OCR, Tally, GSTN
       auth.js      sessions + role-based access control
       api.js       REST API handlers for all modules

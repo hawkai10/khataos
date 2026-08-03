@@ -17,11 +17,9 @@ KhataOS API ──► GSP taxpayer API ──► GSTN
      └──► e-Invoice IRP           (POST /einv/v1.0/irn/generate)
 ```
 
-It **activates automatically when the environment variables below are set**
-and `GSTN_MOCK` is not `1`; otherwise it runs a deterministic simulator that
-generates a GSP-shaped GSTR-2B payload from the platform's own invoices
-(first invoice "not yet reflected", second at 88% value) so the mismatch scan
-always has real flags to show. The repo therefore always runs.
+It **activates automatically when the environment variables below are set**;
+otherwise every endpoint refuses with `503`. No simulated GSTR-2B payloads
+exist — data only enters through a real GSP fetch.
 
 ## Configuration
 
@@ -36,8 +34,6 @@ always has real flags to show. The repo therefore always runs.
 | `GSTN_EINVOICE_BASE_URL` | no | IRP base URL; default `https://einvoice1.gst.gov.in` (production IRP) |
 | `GSTN_AUTH_PATH` / `GSTN_OTP_PATH` / `GSTN_GSTR2B_PATH` | no | Endpoint overrides; defaults match the standard GSTN/GSP paths above |
 | `GSTN_IP_USR` | no | `ip-usr` header value; default `127.0.0.1` |
-| `GSTN_MOCK` | no | Set to `1` to force the simulator even when credentials are present (sandbox testing) |
-
 Example:
 
 ```powershell
@@ -59,15 +55,15 @@ GSTN auth is short-lived (~6 h), so the app goes through the same dance a
 human finance user does in the GSP portal:
 
 ```text
-POST /api/gstn/otp/request     → GSP sends SMS/email OTP (mock: any 6 digits)
+POST /api/gstn/otp/request     → GSP sends SMS/email OTP
 POST /api/gstn/otp/validate    → { otp }  → GSP returns auth_token (cached ~6 h)
 ```
 
 The `auth_token` is cached in-process and attached as the `auth-token` header
 on subsequent GSTR-2B / IRN calls. Once a token expires the next fetch fails
-with a clear 401-style error asking the operator to re-authenticate. In mock
-mode the same endpoints return simulated OTP references and a masked
-`MOCK-AUTH-…` token so the UI flow is identical.
+with a clear 401-style error asking the operator to re-authenticate. Without
+`GSTN_*` credentials every endpoint refuses with `503` - no simulated OTP
+references or tokens exist.
 
 ## GSTR-2B fetch and mapping
 
@@ -99,8 +95,8 @@ GSP returns a document-shaped payload whose `b2b` block looks like this:
 `mapGstr2b` (unit-tested in `tests/gstn.test.js`) converts each `b2b` row into
 the platform snapshot shape and computes the ITC totals that feed the GST
 dashboard and the GSTR-2B vs platform-invoice mismatch scan. The snapshot is
-persisted to `gstr2b_snapshots` with `source = 'gstn-live'` (or
-`'gstn-simulated'` in mock mode), which the System Health page reports.
+persisted to `gstr2b_snapshots` with `source = 'gstn-live'`, which the System
+Health page reports.
 
 | GSP field | KhataOS field |
 | --- | --- |
@@ -114,12 +110,11 @@ persisted to `gstr2b_snapshots` with `source = 'gstn-live'` (or
 
 The adapter implements the IRP `generate` call (`/einv/v1.0/irn/generate`)
 with a full B2B v1.03 payload (`buildEinvoiceBody`): transaction type B2B,
-seller/buyer GSTINs, HSN item list, and value details. In mock mode it returns
-a deterministic `IRN-<sha256>` with `irp_status: IRN_GENERATED`; in live mode
-it posts to the IRP and returns the real `irn`, `signed_qr_code`, and
-`signed_invoice`. The MVP keeps this at the adapter level — outward-invoice
-e-invoicing is a Phase 2 surface — but the contract is ready to wire into the
-invoice UI without backend changes.
+seller/buyer GSTINs, HSN item list, and value details. It posts to the IRP
+and returns the real `irn`, `signed_qr_code`, and `signed_invoice` once
+credentials are configured. The MVP keeps this at the adapter level —
+outward-invoice e-invoicing is a Phase 2 surface — but the contract is ready
+to wire into the invoice UI without backend changes.
 
 ## Going live
 
@@ -141,6 +136,6 @@ env var.
 ## Testing without production keys
 
 `tests/gstn.test.js` covers the GSP mapping against a real fixture, the
-mock OTP/auth contract, the deterministic mock mismatch behavior, and the
-IRN body/IRN generation. The end-to-end suite (`tests/smoke.js`) forces
-`GSTN_MOCK=1` and exercises the config, OTP, and refresh endpoints.
+unconfigured 503 guards, and the IRN body. The end-to-end suite
+(`tests/smoke.js`) exercises the config and guarded endpoints without any
+credentials.

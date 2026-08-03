@@ -132,6 +132,7 @@ Manager only). Every import runs auto-map and returns `mapping.updated`.
 
 - Swap the dependency-free parser for `fast-xml-parser` once real exports have
   been sampled across TallyPrime releases (report/export shapes vary).
-- Build the live GSP/GSTN credential path (stub in mock mode today).
+- Wire live GSTN credentials when available; the adapter refuses (503) until
+  `GSTN_*` env vars are set (no mock payloads exist).
 - Add master deletion semantics on re-export (imports upsert but never remove
   masters that disappeared from Tally).
