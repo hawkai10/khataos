@@ -41,7 +41,7 @@ function parseSchemaText() {
   while ((mm = re.exec(m[1]))) {
     const cols = [];
     for (const line of mm[2].split('\n')) {
-      const cm = line.match(/^\s*(\w+)\s+(TEXT|REAL|INTEGER)/i);
+      const cm = line.match(/^\s*(\w+)\s+(TEXT|REAL|INTEGER|BIGINT)/i);
       if (cm) cols.push(cm[1]);
     }
     tables[mm[1]] = cols;

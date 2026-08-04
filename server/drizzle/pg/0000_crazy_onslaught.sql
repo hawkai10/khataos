@@ -72,8 +72,8 @@ CREATE TABLE IF NOT EXISTS "bank_transactions" (
 	"external_id" text,
 	"txn_date" text NOT NULL,
 	"value_date" text,
-	"amount" double precision NOT NULL,
-	"balance_after" double precision,
+	"amount" bigint NOT NULL,
+	"balance_after" bigint,
 	"description" text,
 	"mode" text,
 	"ref_no" text,
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS "cash_daily" (
 	"company_id" text NOT NULL,
 	"account_id" text NOT NULL,
 	"date" text NOT NULL,
-	"closing_balance" double precision NOT NULL,
+	"closing_balance" bigint NOT NULL,
 	"source" text DEFAULT 'aa',
 	CONSTRAINT "cash_daily_account_date" UNIQUE("account_id","date")
 );
@@ -122,14 +122,14 @@ CREATE TABLE IF NOT EXISTS "invoices" (
 	"due_date" text,
 	"source" text NOT NULL,
 	"status" text NOT NULL,
-	"gross_amount" double precision DEFAULT 0 NOT NULL,
-	"taxable_amount" double precision DEFAULT 0 NOT NULL,
-	"cgst" double precision DEFAULT 0,
-	"sgst" double precision DEFAULT 0,
-	"igst" double precision DEFAULT 0,
-	"cess" double precision DEFAULT 0,
-	"tds_amount" double precision DEFAULT 0,
-	"net_payable" double precision DEFAULT 0,
+	"gross_amount" bigint DEFAULT 0 NOT NULL,
+	"taxable_amount" bigint DEFAULT 0 NOT NULL,
+	"cgst" bigint DEFAULT 0,
+	"sgst" bigint DEFAULT 0,
+	"igst" bigint DEFAULT 0,
+	"cess" bigint DEFAULT 0,
+	"tds_amount" bigint DEFAULT 0,
+	"net_payable" bigint DEFAULT 0,
 	"gstin_vendor" text,
 	"hsns" text DEFAULT '[]',
 	"purchase_order_no" text,
@@ -151,12 +151,12 @@ CREATE TABLE IF NOT EXISTS "invoice_lines" (
 	"hsn" text,
 	"description" text,
 	"qty" double precision DEFAULT 1,
-	"rate" double precision DEFAULT 0,
-	"taxable" double precision DEFAULT 0,
-	"cgst" double precision DEFAULT 0,
-	"sgst" double precision DEFAULT 0,
-	"igst" double precision DEFAULT 0,
-	"cess" double precision DEFAULT 0
+	"rate" bigint DEFAULT 0,
+	"taxable" bigint DEFAULT 0,
+	"cgst" bigint DEFAULT 0,
+	"sgst" bigint DEFAULT 0,
+	"igst" bigint DEFAULT 0,
+	"cess" bigint DEFAULT 0
 );
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "approvals" (
@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS "payments" (
 	"company_id" text NOT NULL,
 	"vendor_id" text,
 	"invoice_ids" text DEFAULT '[]',
-	"amount" double precision NOT NULL,
+	"amount" bigint NOT NULL,
 	"mode" text NOT NULL,
 	"type" text NOT NULL,
 	"status" text NOT NULL,
@@ -189,8 +189,8 @@ CREATE TABLE IF NOT EXISTS "payments" (
 	"gateway_txn_id" text,
 	"gst_ledger" text,
 	"tds_section" text,
-	"tds_amount" double precision DEFAULT 0,
-	"net_amount" double precision NOT NULL,
+	"tds_amount" bigint DEFAULT 0,
+	"net_amount" bigint NOT NULL,
 	"initiated_by" text,
 	"approved_by" text,
 	"failure_reason" text,
@@ -218,10 +218,10 @@ CREATE TABLE IF NOT EXISTS "gstr2b_snapshots" (
 	"company_id" text NOT NULL,
 	"period" text NOT NULL,
 	"gstin" text,
-	"total_itc" double precision DEFAULT 0,
-	"itc_cgst" double precision DEFAULT 0,
-	"itc_sgst" double precision DEFAULT 0,
-	"itc_igst" double precision DEFAULT 0,
+	"total_itc" bigint DEFAULT 0,
+	"itc_cgst" bigint DEFAULT 0,
+	"itc_sgst" bigint DEFAULT 0,
+	"itc_igst" bigint DEFAULT 0,
 	"data_json" text DEFAULT '[]',
 	"cdnr_json" text DEFAULT '[]',
 	"source" text DEFAULT 'gstr2b',
@@ -235,9 +235,9 @@ CREATE TABLE IF NOT EXISTS "gst_mismatches" (
 	"invoice_no" text,
 	"vendor_gstin" text,
 	"vendor_name" text,
-	"platform_amount" double precision DEFAULT 0,
-	"gstr2b_amount" double precision DEFAULT 0,
-	"variance" double precision DEFAULT 0,
+	"platform_amount" bigint DEFAULT 0,
+	"gstr2b_amount" bigint DEFAULT 0,
+	"variance" bigint DEFAULT 0,
 	"status" text DEFAULT 'open',
 	"note" text
 );
@@ -338,7 +338,7 @@ CREATE TABLE IF NOT EXISTS "tally_ledgers" (
 	"company_id" text NOT NULL,
 	"name" text NOT NULL,
 	"group_name" text,
-	"opening_balance" double precision DEFAULT 0,
+	"opening_balance" bigint DEFAULT 0,
 	"gstin" text,
 	"tally_guid" text,
 	"tally_alterid" integer DEFAULT 0,
@@ -351,7 +351,7 @@ CREATE TABLE IF NOT EXISTS "tally_vouchers" (
 	"voucher_number" text,
 	"voucher_type" text,
 	"date" text,
-	"amount" double precision DEFAULT 0,
+	"amount" bigint DEFAULT 0,
 	"party_name" text,
 	"entry_json" text DEFAULT '[]',
 	"tally_guid" text,
@@ -360,76 +360,20 @@ CREATE TABLE IF NOT EXISTS "tally_vouchers" (
 	"imported_at" text NOT NULL
 );
 --> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_company_id_companies_id_fk') THEN
-    ALTER TABLE "users" ADD CONSTRAINT "users_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sessions_user_id_users_id_fk') THEN
-    ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'bank_accounts_company_id_companies_id_fk') THEN
-    ALTER TABLE "bank_accounts" ADD CONSTRAINT "bank_accounts_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'bank_accounts_bank_code_banks_code_fk') THEN
-    ALTER TABLE "bank_accounts" ADD CONSTRAINT "bank_accounts_bank_code_banks_code_fk" FOREIGN KEY ("bank_code") REFERENCES "public"."banks"("code") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'bank_transactions_account_id_bank_accounts_id_fk') THEN
-    ALTER TABLE "bank_transactions" ADD CONSTRAINT "bank_transactions_account_id_bank_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."bank_accounts"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'vendors_company_id_companies_id_fk') THEN
-    ALTER TABLE "vendors" ADD CONSTRAINT "vendors_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoices_company_id_companies_id_fk') THEN
-    ALTER TABLE "invoices" ADD CONSTRAINT "invoices_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoices_vendor_id_vendors_id_fk') THEN
-    ALTER TABLE "invoices" ADD CONSTRAINT "invoices_vendor_id_vendors_id_fk" FOREIGN KEY ("vendor_id") REFERENCES "public"."vendors"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_lines_invoice_id_invoices_id_fk') THEN
-    ALTER TABLE "invoice_lines" ADD CONSTRAINT "invoice_lines_invoice_id_invoices_id_fk" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'approvals_invoice_id_invoices_id_fk') THEN
-    ALTER TABLE "approvals" ADD CONSTRAINT "approvals_invoice_id_invoices_id_fk" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'payments_company_id_companies_id_fk') THEN
-    ALTER TABLE "payments" ADD CONSTRAINT "payments_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'payments_vendor_id_vendors_id_fk') THEN
-    ALTER TABLE "payments" ADD CONSTRAINT "payments_vendor_id_vendors_id_fk" FOREIGN KEY ("vendor_id") REFERENCES "public"."vendors"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'recon_matches_bank_txn_id_bank_transactions_id_fk') THEN
-    ALTER TABLE "recon_matches" ADD CONSTRAINT "recon_matches_bank_txn_id_bank_transactions_id_fk" FOREIGN KEY ("bank_txn_id") REFERENCES "public"."bank_transactions"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'decentro_links_company_id_companies_id_fk') THEN
-    ALTER TABLE "decentro_links" ADD CONSTRAINT "decentro_links_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;
-  END IF;
-END $$;--> statement-breakpoint
+ALTER TABLE "users" ADD CONSTRAINT "users_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "bank_accounts" ADD CONSTRAINT "bank_accounts_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "bank_accounts" ADD CONSTRAINT "bank_accounts_bank_code_banks_code_fk" FOREIGN KEY ("bank_code") REFERENCES "public"."banks"("code") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "bank_transactions" ADD CONSTRAINT "bank_transactions_account_id_bank_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."bank_accounts"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "vendors" ADD CONSTRAINT "vendors_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "invoices" ADD CONSTRAINT "invoices_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "invoices" ADD CONSTRAINT "invoices_vendor_id_vendors_id_fk" FOREIGN KEY ("vendor_id") REFERENCES "public"."vendors"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "invoice_lines" ADD CONSTRAINT "invoice_lines_invoice_id_invoices_id_fk" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "approvals" ADD CONSTRAINT "approvals_invoice_id_invoices_id_fk" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "payments" ADD CONSTRAINT "payments_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "payments" ADD CONSTRAINT "payments_vendor_id_vendors_id_fk" FOREIGN KEY ("vendor_id") REFERENCES "public"."vendors"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "recon_matches" ADD CONSTRAINT "recon_matches_bank_txn_id_bank_transactions_id_fk" FOREIGN KEY ("bank_txn_id") REFERENCES "public"."bank_transactions"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "decentro_links" ADD CONSTRAINT "decentro_links_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "idx_audit_company_at" ON "audit_logs" USING btree ("company_id","at");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "idx_btx_company_matched" ON "bank_transactions" USING btree ("company_id","matched","status","txn_date");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "idx_btx_company_txndate" ON "bank_transactions" USING btree ("company_id","txn_date");--> statement-breakpoint

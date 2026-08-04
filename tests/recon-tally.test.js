@@ -41,8 +41,8 @@ async function setup(coId, vendorLedger) {
   await insert('invoices', {
     id: 'inv-' + coId, company_id: coId, invoice_no: 'INV-2026-1', invoice_date: todayStr(),
     due_date: todayStr(), source: 'manual', status: 'approved',
-    gross_amount: 75000, taxable_amount: 75000, cgst: 0, sgst: 0, igst: 0, cess: 0,
-    tds_amount: 0, net_payable: 75000, hsns: '[]', created_at: nowIso(),
+    gross_amount: 7500000, taxable_amount: 7500000, cgst: 0, sgst: 0, igst: 0, cess: 0,
+    tds_amount: 0, net_payable: 7500000, hsns: '[]', created_at: nowIso(),
   });
 }
 
@@ -67,7 +67,7 @@ async function addVoucher(coId, number, type, amount, party, entries) {
   await check('bill-ref with different amount -> mismatch, transaction stays unmatched', async () => {
     const co = 'rc-mismatch-' + Date.now();
     await setup(co, 'Sundry Creditors - Sai Traders');
-    await addTxn(co, 'txn-1', -75000, 'R1');
+    await addTxn(co, 'txn-1', -7500000, 'R1');
     await addVoucher(co, 'RC-1', 'Receipt', 50000, 'Sundry Creditors - Sai Traders', [
       { ledger: 'HDFC Bank - Current A/c', amount: -50000, positive: true, bill_refs: [] },
       { ledger: 'Sundry Creditors - Sai Traders', amount: 50000, positive: false, bill_refs: ['INV-2026-1'] },
@@ -85,10 +85,10 @@ async function addVoucher(coId, number, type, amount, party, entries) {
   await check('bill-ref with matching amount -> billref match labelled as Tally voucher', async () => {
     const co = 'rc-billref-' + Date.now();
     await setup(co, 'Sundry Creditors - Sai Traders');
-    await addTxn(co, 'txn-2', -75000, 'R2');
-    await addVoucher(co, 'PY-1', 'Payment', 75000, 'Sundry Creditors - Sai Traders', [
-      { ledger: 'Sundry Creditors - Sai Traders', amount: 75000, positive: false, bill_refs: ['INV-2026-1'] },
-      { ledger: 'HDFC Bank - Current A/c', amount: -75000, positive: true, bill_refs: [] },
+    await addTxn(co, 'txn-2', -7500000, 'R2');
+    await addVoucher(co, 'PY-1', 'Payment', 7500000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 7500000, positive: false, bill_refs: ['INV-2026-1'] },
+      { ledger: 'HDFC Bank - Current A/c', amount: -7500000, positive: true, bill_refs: [] },
     ]);
     const stats = await recon.matchAll(co);
     const m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-2']);
@@ -104,10 +104,10 @@ async function addVoucher(coId, number, type, amount, party, entries) {
   await check('amount + date + party fallback -> fuzzy match against Tally voucher', async () => {
     const co = 'rc-fuzzy-' + Date.now();
     await setup(co, 'Sundry Creditors - Sai Traders');
-    await addTxn(co, 'txn-3', -25000, 'R3');
-    await addVoucher(co, 'PY-2', 'Payment', 25000, 'Sundry Creditors - Sai Traders', [
-      { ledger: 'Rent Expenses', amount: -25000, positive: true, bill_refs: [] },
-      { ledger: 'Sundry Creditors - Sai Traders', amount: 25000, positive: false, bill_refs: [] },
+    await addTxn(co, 'txn-3', -2500000, 'R3');
+    await addVoucher(co, 'PY-2', 'Payment', 2500000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Rent Expenses', amount: -2500000, positive: true, bill_refs: [] },
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 2500000, positive: false, bill_refs: [] },
     ]);
     const stats = await recon.matchAll(co);
     const m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-3']);
@@ -123,10 +123,10 @@ async function addVoucher(coId, number, type, amount, party, entries) {
   await check('cancelled voucher is stored but never offered as a recon candidate', async () => {
     const co = 'rc-cancelled-' + Date.now();
     await setup(co, 'Sundry Creditors - Sai Traders');
-    await addTxn(co, 'txn-4', -25000, 'R4');
-    await addVoucher(co, 'PY-C', 'Payment', 25000, 'Sundry Creditors - Sai Traders', [
-      { ledger: 'Rent Expenses', amount: -25000, positive: true, bill_refs: [] },
-      { ledger: 'Sundry Creditors - Sai Traders', amount: 25000, positive: false, bill_refs: [] },
+    await addTxn(co, 'txn-4', -2500000, 'R4');
+    await addVoucher(co, 'PY-C', 'Payment', 2500000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Rent Expenses', amount: -2500000, positive: true, bill_refs: [] },
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 2500000, positive: false, bill_refs: [] },
     ]);
     await run('UPDATE tally_vouchers SET cancelled = 1 WHERE company_id = ?', [co]);
     const stats = await recon.matchAll(co);
@@ -158,10 +158,10 @@ async function addVoucher(coId, number, type, amount, party, entries) {
   await check('bank debit reconciles against a Credit Note voucher', async () => {
     const co = 'rc-cn-' + Date.now();
     await setup(co, 'Sundry Creditors - Sai Traders');
-    await addTxn(co, 'txn-6', -15000, 'R6'); // negative = bank debit (refund paid out)
-    await addVoucher(co, 'CN-1', 'Credit Note', 15000, 'Sundry Creditors - Sai Traders', [
-      { ledger: 'Sales Return', amount: -15000, positive: true, bill_refs: [] },
-      { ledger: 'Sundry Creditors - Sai Traders', amount: 15000, positive: false, bill_refs: [] },
+    await addTxn(co, 'txn-6', -1500000, 'R6'); // negative = bank debit (refund paid out)
+    await addVoucher(co, 'CN-1', 'Credit Note', 1500000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sales Return', amount: -1500000, positive: true, bill_refs: [] },
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 1500000, positive: false, bill_refs: [] },
     ]);
     const stats = await recon.matchAll(co);
     const m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-6']);
@@ -175,13 +175,13 @@ async function addVoucher(coId, number, type, amount, party, entries) {
   await check('bill-ref ties a Payment to a Tally-side invoice number shared across vouchers', async () => {
     const co = 'rc-tallyref-' + Date.now();
     await setup(co, 'Sundry Creditors - Sai Traders');
-    await addVoucher(co, 'PU-REF', 'Purchase', 75000, 'Sundry Creditors - Sai Traders', [
-      { ledger: 'Sundry Creditors - Sai Traders', amount: 75000, positive: false, bill_refs: ['INV-TALLY-1'] },
+    await addVoucher(co, 'PU-REF', 'Purchase', 7500000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 7500000, positive: false, bill_refs: ['INV-TALLY-1'] },
     ]);
-    await addTxn(co, 'txn-7', -75000, 'R7');
-    await addVoucher(co, 'PY-REF', 'Payment', 75000, 'Sundry Creditors - Sai Traders', [
-      { ledger: 'Sundry Creditors - Sai Traders', amount: 75000, positive: false, bill_refs: ['INV-TALLY-1'] },
-      { ledger: 'HDFC Bank - Current A/c', amount: -75000, positive: true, bill_refs: [] },
+    await addTxn(co, 'txn-7', -7500000, 'R7');
+    await addVoucher(co, 'PY-REF', 'Payment', 7500000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 7500000, positive: false, bill_refs: ['INV-TALLY-1'] },
+      { ledger: 'HDFC Bank - Current A/c', amount: -7500000, positive: true, bill_refs: [] },
     ]);
     const stats = await recon.matchAll(co);
     const m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-7']);
@@ -194,14 +194,81 @@ async function addVoucher(coId, number, type, amount, party, entries) {
   await check('a voucher\u2019s own ref alone never strong-matches unrelated transactions', async () => {
     const co = 'rc-selfref-' + Date.now();
     await setup(co, 'Sundry Creditors - Sai Traders');
-    await addVoucher(co, 'PU-SELF', 'Purchase', 75000, 'Sundry Creditors - Sai Traders', [
-      { ledger: 'Sundry Creditors - Sai Traders', amount: 75000, positive: false, bill_refs: ['INV-SELF-1'] },
+    await addVoucher(co, 'PU-SELF', 'Purchase', 7500000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 7500000, positive: false, bill_refs: ['INV-SELF-1'] },
     ]);
-    await addTxn(co, 'txn-8', -25000, 'R8');
+    await addTxn(co, 'txn-8', -2500000, 'R8');
     const stats = await recon.matchAll(co);
     const mm = await get('SELECT * FROM recon_matches WHERE bank_txn_id = ?', ['txn-8']);
     assert.strictEqual(mm, null, 'own ref must not create a mismatch for unrelated amounts');
     assert.strictEqual(stats.auto, 0);
+  });
+
+  // ---- explicit, configurable inward-remittance bank-charge rule ----
+  await check('bank-charge rule: tolerance helper parses env defensively', () => {
+    process.env.RECON_BANK_FEE_TOLERANCE_PAISE = '99';
+    assert.strictEqual(recon.bankChargeTolerancePaise(), 99);
+    process.env.RECON_BANK_FEE_TOLERANCE_PAISE = '100.9';
+    assert.strictEqual(recon.bankChargeTolerancePaise(), 100); // floored
+    process.env.RECON_BANK_FEE_TOLERANCE_PAISE = '-5';
+    assert.strictEqual(recon.bankChargeTolerancePaise(), 0);
+    process.env.RECON_BANK_FEE_TOLERANCE_PAISE = 'abc';
+    assert.strictEqual(recon.bankChargeTolerancePaise(), 0);
+    delete process.env.RECON_BANK_FEE_TOLERANCE_PAISE;
+    assert.strictEqual(recon.bankChargeTolerancePaise(), 0);
+  });
+
+  await check('bank-charge rule: inward credit short by charges matches ONLY when the rule is enabled', async () => {
+    const co = 'rc-fee-' + Date.now();
+    await setup(co, 'Sundry Creditors - Sai Traders');
+    // Receipt voucher of 10000 paise (₹100.00); bank credit arrives net of a
+    // 99-paise bank charge (9901 paise).
+    await addVoucher(co, 'RC-FEE', 'Receipt', 10000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'HDFC Bank - Current A/c', amount: -10000, positive: true, bill_refs: [] },
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 10000, positive: false, bill_refs: [] },
+    ]);
+    await addTxn(co, 'txn-fee', 9901, 'R-FEE');
+
+    // Default (no env): exact matching rejects the short credit.
+    delete process.env.RECON_BANK_FEE_TOLERANCE_PAISE;
+    let stats = await recon.matchAll(co);
+    let m = await get('SELECT * FROM recon_matches WHERE bank_txn_id = ?', ['txn-fee']);
+    assert.strictEqual(m, null, 'exact matching must reject a credit short of the voucher');
+    assert.strictEqual(stats.auto, 0);
+
+    // Explicit rule: up to 99 paise of inward-remittance bank charges.
+    process.env.RECON_BANK_FEE_TOLERANCE_PAISE = '99';
+    try {
+      stats = await recon.matchAll(co);
+      m = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = ? AND status = 'matched'`, ['txn-fee']);
+      assert.ok(m, 'short credit must match under the explicit bank-charge rule');
+      assert.strictEqual(m.tally_voucher_no, 'RC-FEE');
+      assert.strictEqual(stats.auto, 1);
+    } finally {
+      delete process.env.RECON_BANK_FEE_TOLERANCE_PAISE;
+    }
+  });
+
+  await check('bank-charge rule: outward debits never benefit from the tolerance', async () => {
+    const co = 'rc-fee-debit-' + Date.now();
+    await setup(co, 'Sundry Creditors - Sai Traders');
+    await addVoucher(co, 'PY-FEE', 'Payment', 10000, 'Sundry Creditors - Sai Traders', [
+      { ledger: 'Rent Expenses', amount: -10000, positive: true, bill_refs: [] },
+      { ledger: 'Sundry Creditors - Sai Traders', amount: 10000, positive: false, bill_refs: [] },
+    ]);
+    await addTxn(co, 'txn-fee-d', -10000, 'R-FEE-D'); // exact debit matches
+    await addTxn(co, 'txn-fee-d2', -10099, 'R-FEE-D2'); // debit WITH bank charges
+    process.env.RECON_BANK_FEE_TOLERANCE_PAISE = '99';
+    try {
+      const stats = await recon.matchAll(co);
+      const exact = await get(`SELECT * FROM recon_matches WHERE bank_txn_id = 'txn-fee-d' AND status = 'matched'`, []);
+      const charged = await get('SELECT * FROM recon_matches WHERE bank_txn_id = ?', ['txn-fee-d2']);
+      assert.ok(exact, 'the exact debit still matches');
+      assert.strictEqual(charged, null, 'an outward debit with charges must never match under the rule');
+      assert.strictEqual(stats.auto, 1);
+    } finally {
+      delete process.env.RECON_BANK_FEE_TOLERANCE_PAISE;
+    }
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

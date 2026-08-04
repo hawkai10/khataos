@@ -137,13 +137,13 @@ function buildXml() {
 
   // ===================== CHANNEL 2: BANK =====================
   const txns = [
-    ['txnA', -50000, 'NEFT/OUTWARD Vendor Alpha Traders', 'NEFT', 'TXN-A'],
-    ['txnB', 30000, 'NEFT/CREDIT Customer Gamma Retail', 'NEFT', 'TXN-B'],
-    ['txnC', 20000, 'NEFT/CREDIT Vendor Alpha Traders (refund)', 'NEFT', 'TXN-C'],
-    ['txnD', -15000, 'NEFT/OUTWARD Customer Gamma Retail (refund)', 'NEFT', 'TXN-D'],
-    ['txnE', -99999, 'NEFT/OUTWARD Vendor Alpha Traders', 'NEFT', 'TXN-E'],
-    ['txnF', -25000, 'NEFT OFFICE SUPPLIES', 'NEFT', 'TXN-F'],
-    ['txnG', -118000, 'NEFT/OUTWARD Vendor Alpha Traders', 'NEFT', 'TXN-G'],
+    ['txnA', -5000000, 'NEFT/OUTWARD Vendor Alpha Traders', 'NEFT', 'TXN-A'],
+    ['txnB', 3000000, 'NEFT/CREDIT Customer Gamma Retail', 'NEFT', 'TXN-B'],
+    ['txnC', 2000000, 'NEFT/CREDIT Vendor Alpha Traders (refund)', 'NEFT', 'TXN-C'],
+    ['txnD', -1500000, 'NEFT/OUTWARD Customer Gamma Retail (refund)', 'NEFT', 'TXN-D'],
+    ['txnE', -9999900, 'NEFT/OUTWARD Vendor Alpha Traders', 'NEFT', 'TXN-E'],
+    ['txnF', -2500000, 'NEFT OFFICE SUPPLIES', 'NEFT', 'TXN-F'],
+    ['txnG', -11800000, 'NEFT/OUTWARD Vendor Alpha Traders', 'NEFT', 'TXN-G'],
   ];
   await check('channel-2 bank: statement rows of different types are stored', async () => {
     for (const [id, amount, desc, mode, ref] of txns) {
@@ -164,7 +164,7 @@ function buildXml() {
         { ctin: GSTIN.alpha, docno: 'INV-CANCEL', txval: 80000, cgst: 7200, sgst: 7200, igst: 0 },
       ],
       cdnr: [
-        { ctin: GSTIN.alpha, docno: 'DN-GST-1', txval: 16949.15, cgst: 1525.42, sgst: 1525.42, igst: 0, typ: 'D' },
+        { ctin: GSTIN.alpha, docno: 'DN-GST-1', txval: 16949.16, cgst: 1525.42, sgst: 1525.42, igst: 0, typ: 'D' },
         { ctin: GSTIN.gamma, docno: 'CN-GST-1', txval: 12711.86, cgst: 1144.07, sgst: 1144.07, igst: 0, typ: 'C' },
         { ctin: GSTIN.gamma, docno: 'CN-GST-2', txval: 10000, cgst: 900, sgst: 900, igst: 0, typ: 'C' },
       ],
@@ -230,10 +230,10 @@ function buildXml() {
   await check('aging: purchases netted by Debit Notes, cancelled excluded', async () => {
     const a = await Aging.payablesAging(co);
     // 118000 - 30000 (Alpha notes) + 59000 + 60000 + 50000 (Beta) = 257000
-    assert.strictEqual(a.total, 257000, JSON.stringify(a));
+    assert.strictEqual(a.total, '257000.00', JSON.stringify(a));
     assert.strictEqual(a.items.length, 4, JSON.stringify(a.items));
     const pu1 = a.items.find((i) => i.voucher_number === 'PU-1001');
-    assert.strictEqual(pu1.amount, 88000);
+    assert.strictEqual(pu1.amount, '88000.00');
     assert.ok(!a.items.some((i) => i.voucher_number === 'PU-CANC'), 'cancelled purchase must not age');
   });
 

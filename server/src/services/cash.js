@@ -4,7 +4,8 @@
 // and trend queries reused by the cash, dashboard and metrics routes.
 
 const { all, get } = require('../db');
-const { daysAgo, inr } = require('../util');
+const { daysAgo } = require('../util');
+const { Money } = require('../money');
 
 async function listBankAccounts(coId, orderBy = 'ORDER BY ba.account_name') {
   return all(`SELECT ba.*, b.name AS bank_name FROM bank_accounts ba JOIN banks b ON b.code = ba.bank_code WHERE ba.company_id = ? ${orderBy}`, [coId]);
@@ -26,7 +27,7 @@ async function accountUncleared(accountId) {
 
 async function totalUncleared(coId) {
   const r = await get(`SELECT COALESCE(SUM(amount),0) AS u FROM bank_transactions WHERE company_id = ? AND status='uncleared' AND amount > 0`, [coId]);
-  return inr(r.u);
+  return r.u || 0;
 }
 
 async function lastBankSync(coId) {
@@ -53,7 +54,7 @@ async function availableCash(coId) {
         (SELECT cd.closing_balance FROM cash_daily cd WHERE cd.account_id = ba.id ORDER BY cd.date DESC LIMIT 1) AS balance
       FROM bank_accounts ba WHERE ba.company_id = ?
     ) t`, [coId]);
-  return { accounts: r ? Number(r.c) : 0, available: inr(r ? Number(r.total) : 0) };
+  return { accounts: r ? Number(r.c) : 0, available: r ? Number(r.total) : 0 };
 }
 
 // Monthly burn from the last 90 days of outflows + runway in months. Shared by
@@ -61,8 +62,12 @@ async function availableCash(coId) {
 async function runway(coId) {
   const { accounts, available } = await availableCash(coId);
   const outflows = await get(`SELECT COALESCE(SUM(amount),0) AS s FROM bank_transactions WHERE company_id = ? AND amount < 0 AND txn_date >= ?`, [coId, daysAgo(89)]);
-  const monthlyBurn = inr(Math.abs(outflows.s) / 3);
-  return { available, accounts: accounts.length, monthly_burn: monthlyBurn, runway_months: monthlyBurn > 0 ? inr(available / monthlyBurn) : null };
+  const monthlyBurn = Money.fromPaise(Math.abs(Number(outflows.s))).divide(3);
+  return {
+    available, accounts: accounts.length,
+    monthly_burn: monthlyBurn.toPaise(),
+    runway_months: !monthlyBurn.isZero() ? Number(available) / Number(monthlyBurn.toPaise()) : null,
+  };
 }
 
 module.exports = { listBankAccounts, activeAccounts, closingBalance, accountUncleared, totalUncleared, lastBankSync, cashTrend, recentTransactions, availableCash, runway };

@@ -30,9 +30,9 @@ const { eq } = require('drizzle-orm');
     await d.delete(t).where(eq(t.company_id, co));
   }
   await d.insert(T.tally_groups).values({ id: g, company_id: co, name: 'Sundry Creditors', parent: 'Current Liabilities', tally_guid: 'guid-g1-' + ns, tally_alterid: 1 });
-  await d.insert(T.tally_ledgers).values({ id: l, company_id: co, name: 'Vendor A', group_name: 'Sundry Creditors', opening_balance: 92040.5, gstin: '29AABCA1111K1Z5', tally_guid: 'guid-l1-' + ns, tally_alterid: 3 });
-  await d.insert(T.tally_vouchers).values({ id: v, company_id: co, voucher_number: 'PU-1', voucher_type: 'Purchase', date: '2026-07-30', amount: 118000, party_name: 'Vendor A', entry_json: '[]', tally_guid: 'guid-v1-' + ns, tally_alterid: 7, cancelled: 1, imported_at: '2026-08-03T00:00:00.000Z' });
-  await d.insert(T.gstr2b_snapshots).values({ id: g2b, company_id: co, period: '2026-07', gstin: '29AABCA1111K1Z5', total_itc: 18000, itc_cgst: 9000, itc_sgst: 9000, itc_igst: 0, data_json: '[]', cdnr_json: '[{"docno":"CN-1"}]', source: 'gstn-live', fetched_at: '2026-08-03T00:00:00.000Z' });
+  await d.insert(T.tally_ledgers).values({ id: l, company_id: co, name: 'Vendor A', group_name: 'Sundry Creditors', opening_balance: 9204050, gstin: '29AABCA1111K1Z5', tally_guid: 'guid-l1-' + ns, tally_alterid: 3 });
+  await d.insert(T.tally_vouchers).values({ id: v, company_id: co, voucher_number: 'PU-1', voucher_type: 'Purchase', date: '2026-07-30', amount: 11800000, party_name: 'Vendor A', entry_json: '[]', tally_guid: 'guid-v1-' + ns, tally_alterid: 7, cancelled: 1, imported_at: '2026-08-03T00:00:00.000Z' });
+  await d.insert(T.gstr2b_snapshots).values({ id: g2b, company_id: co, period: '2026-07', gstin: '29AABCA1111K1Z5', total_itc: 1800000, itc_cgst: 900000, itc_sgst: 900000, itc_igst: 0, data_json: '[]', cdnr_json: '[{"docno":"CN-1"}]', source: 'gstn-live', fetched_at: '2026-08-03T00:00:00.000Z' });
   const out = {
     // Scope to this run's company so the check is valid even when other
     // suites have already written rows to the same (live) database.

@@ -213,7 +213,7 @@ async function waitForServer(proc, ms = 20000) {
     }, cfo);
     check('tally: xml import imports purchase voucher', importRes.parsed.vouchers === 1 && importRes.imported.vouchers.imported === 1 && importRes.validation.errors.length === 0, JSON.stringify(importRes.imported).slice(0, 80));
     const aging = await api('GET', '/api/payables/aging', null, cfo);
-    check('payables: aging buckets from imported Tally purchase vouchers', aging && typeof aging.buckets === 'object' && aging.total === 59000, JSON.stringify(aging));
+    check('payables: aging buckets from imported Tally purchase vouchers', aging && typeof aging.buckets === 'object' && aging.total === '59000.00', JSON.stringify(aging));
     const mapping = await api('GET', '/api/tally/mappings', null, cfo);
     check('tally: vendor-ledger mapping report', mapping && Array.isArray(mapping.rows) && mapping.ledgers.some((l) => l.name === 'Smoke Vendor Traders'), JSON.stringify(mapping ? mapping.summary : null));
     const autoMap = await api('POST', '/api/tally/mappings/auto', {}, cfo);

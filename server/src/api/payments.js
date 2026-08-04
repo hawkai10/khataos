@@ -6,12 +6,13 @@
 
 const { all, get, insert, run, update } = require('../db');
 const { uid, nowIso, daysAgo } = require('../util');
+const { Money } = require('../money');
 const { ApiError, audit, requireRole } = require('../auth');
 const { PaymentGateway, TallyConnector } = require('../adapters');
 const recon = require('../recon');
 const PaymentService = require('../services/payments');
 const { bodyOf, requireOneOf } = require('./validators');
-const { companyOf } = require('./helpers');
+const { companyOf, rupees, publicize, publicizeRows } = require('./helpers');
 
 async function register(fastify) {
   fastify.get('/api/payments', async (request, reply) => {
@@ -23,7 +24,7 @@ async function register(fastify) {
   fastify.get('/api/payments/:id', async (request, reply) => {
     const row = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [request.params.id, companyOf(request.user)]);
     if (!row) throw new ApiError(404, 'payment not found');
-    reply.ok(row);
+    reply.ok(publicize(row, 'payments'));
   });
 
   fastify.post('/api/payments', {
@@ -52,7 +53,7 @@ async function register(fastify) {
     if (!invoices.length) throw new ApiError(400, 'no valid invoices');
     const mode = requireOneOf(b.mode || 'NEFT', PaymentService.PAYMENT_MODES, 'invalid mode');
     const amounts = PaymentService.computeAmounts(invoices);
-    const needsApproval = amounts.amount > await PaymentService.approvalThreshold(coId);
+    const needsApproval = amounts.amount.gt(await PaymentService.approvalThreshold(coId));
     const type = b.type === 'instant' ? 'instant' : b.scheduled_date ? 'scheduled' : 'batch';
     const row = await PaymentService.insertPayment(coId, {
       vendor, invoices, mode, type,
@@ -63,8 +64,8 @@ async function register(fastify) {
     if (!needsApproval) {
       await PaymentGateway.createBatch(coId, [await get('SELECT * FROM payments WHERE id = ?', [row.id])]);
     }
-    await audit(coId, user, 'payment.created', 'payment', row.id, { amount: amounts.amount, mode, needs_approval: needsApproval });
-    reply.ok(row);
+    await audit(coId, user, 'payment.created', 'payment', row.id, { amount: Number(amounts.amount.toPaise()), mode, needs_approval: needsApproval });
+    reply.ok(publicize(row, 'payments'));
   });
 
   fastify.post('/api/payments/:id/approve', async (request, reply) => {
@@ -74,11 +75,11 @@ async function register(fastify) {
     if (!pay) throw new ApiError(404, 'payment not found');
     if (pay.status !== 'pending_approval') throw new ApiError(409, 'payment is not awaiting approval');
     const threshold = await PaymentService.approvalThreshold(coId);
-    if (pay.amount > threshold) requireRole(user, ['cfo']);
+    if (Money.fromPaise(pay.amount).gt(threshold)) requireRole(user, ['cfo']);
     await update('payments', request.params.id, { status: 'approved', approved_by: user.id });
     await PaymentGateway.createBatch(coId, [pay]);
     await audit(coId, user, 'payment.approved', 'payment', request.params.id, { amount: pay.amount });
-    reply.ok(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]));
+    reply.ok(publicize(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]), 'payments'));
   });
 
   fastify.post('/api/payments/:id/execute', async (request, reply) => {
@@ -90,7 +91,7 @@ async function register(fastify) {
     await update('payments', request.params.id, { type: 'instant', status: 'approved', approved_by: user.id });
     await PaymentGateway.createBatch(coId, [await get('SELECT * FROM payments WHERE id = ?', [request.params.id])]);
     await audit(coId, user, 'payment.executed', 'payment', request.params.id, { mode: pay.mode });
-    reply.ok(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]));
+    reply.ok(publicize(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]), 'payments'));
   });
 
   fastify.post('/api/payments/batch', async (request, reply) => {
@@ -114,7 +115,7 @@ async function register(fastify) {
     const rows = await all(`SELECT * FROM payments WHERE id IN (${created.map(() => '?').join(',')})`, created);
     await PaymentGateway.createBatch(coId, rows);
     await audit(coId, user, 'payment.batch_created', 'payment', null, { count: created.length });
-    reply.ok(rows);
+    reply.ok(publicizeRows(rows, 'payments'));
   });
 
   // ===================== RECONCILIATION =====================
@@ -126,7 +127,7 @@ async function register(fastify) {
       JOIN bank_transactions bt ON bt.id = rm.bank_txn_id
       LEFT JOIN payments p ON p.id = rm.payment_id
       WHERE rm.company_id = ? ORDER BY rm.matched_at DESC LIMIT 50`, [coId]);
-    reply.ok({ ...(await recon.score(coId)), as_of: asOf, recent: matches });
+    reply.ok({ ...(await recon.score(coId)), as_of: asOf, recent: matches.map((m) => ({ ...m, bank_amount: rupees(m.bank_amount) })) });
   });
 
   fastify.get('/api/recon/unmatched', async (request, reply) => {
@@ -138,13 +139,14 @@ async function register(fastify) {
     // suggest a payment candidate by amount for each unmatched debit
     const payments = await all(`SELECT * FROM payments WHERE company_id = ? AND status IN ('completed','processing')`, [coId]);
     for (const t of rows) {
-      const suggestion = payments.find((p) => p.net_amount && Math.abs(Math.abs(t.amount) - p.net_amount) <= 1);
-      t.suggested_payment = suggestion ? { id: suggestion.id, reference: suggestion.reference, vendor_id: suggestion.vendor_id, net_amount: suggestion.net_amount } : null;
+      const txnAmt = Money.fromPaise(Math.abs(Number(t.amount) || 0));
+      const suggestion = payments.find((p) => p.net_amount && txnAmt.equals(Money.fromPaise(p.net_amount)));
+      t.suggested_payment = suggestion ? { id: suggestion.id, reference: suggestion.reference, vendor_id: suggestion.vendor_id, net_amount: rupees(suggestion.net_amount) } : null;
     }
     const mismatchRows = await all(`SELECT bank_txn_id, notes FROM recon_matches WHERE company_id = ? AND status = 'mismatch' ORDER BY matched_at DESC`, [coId]);
     const mismatchByTxn = new Map(mismatchRows.map((m) => [m.bank_txn_id, m.notes]));
     for (const t of rows) t.mismatch_note = mismatchByTxn.get(t.id) || null;
-    reply.ok(rows);
+    reply.ok(publicizeRows(rows, 'bank_transactions'));
   });
 
   fastify.post('/api/recon/run', async (request, reply) => {

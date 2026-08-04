@@ -12,6 +12,7 @@ import { Select } from '../components/ui/select.jsx';
 import { PaymentBadge, ModeBadge } from '../components/status-badge.jsx';
 import { get, post } from '../lib/api.js';
 import { inr, fmtDate, fmtDateTime } from '../lib/format.js';
+import { sumRupees, toRupees } from '../lib/money.js';
 import { PageHeader } from '../components/page-header.jsx';
 
 export function Payments({ user }) {
@@ -161,7 +162,7 @@ function CreatePayment({ onDone, user }) {
     }
   }
 
-  const total = vendorInvoices.filter((i) => form.invoice_ids.includes(i.id)).reduce((s, i) => s + Number(i.gross_amount || 0), 0);
+  const total = sumRupees(vendorInvoices.filter((i) => form.invoice_ids.includes(i.id)).map((i) => i.gross_amount || '0.00'));
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
   return (
@@ -211,7 +212,7 @@ function CreatePayment({ onDone, user }) {
           </div>
 
           <div>
-            <Label className="mb-1.5 block">Invoices ({form.invoice_ids.length} selected · {inr(total)})</Label>
+            <Label className="mb-1.5 block">Invoices ({form.invoice_ids.length} selected · {inr(toRupees(total))})</Label>
             <div className="slim-scroll max-h-44 space-y-1 overflow-y-auto rounded-md border p-2">
               {vendorInvoices.map((i) => (
                 <label key={i.id} className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
@@ -227,7 +228,7 @@ function CreatePayment({ onDone, user }) {
         </div>
         <DialogFooter>
           <Button onClick={submit} disabled={busy || !form.vendor_id || !form.invoice_ids.length}>
-            {busy ? 'Creating…' : `Create payment · ${inr(total)}`}
+            {busy ? 'Creating…' : `Create payment · ${inr(toRupees(total))}`}
           </Button>
         </DialogFooter>
       </DialogContent>

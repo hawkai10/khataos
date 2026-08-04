@@ -1,5 +1,6 @@
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { inrCompact } from '../lib/format.js';
+import { rupeeToNumber } from '../lib/money.js';
 
 function ChartTooltip({ active, payload, label }) {
   if (!active || !payload || !payload.length) return null;
@@ -12,9 +13,10 @@ function ChartTooltip({ active, payload, label }) {
 }
 
 export function CashChart({ data = [], height = 240 }) {
+  const chartData = data.map((d) => ({ ...d, balance: rupeeToNumber(d.balance) }));
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <AreaChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
+      <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
         <defs>
           <linearGradient id="cashFill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.25} />

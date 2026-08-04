@@ -63,7 +63,7 @@ async function check(name, fn) {
     assert.strictEqual(d.ledgers[0].name, 'Sai Traders & Co'); // XML entity unescaped
     assert.strictEqual(d.ledgers[0].group_name, 'Sundry Creditors');
     assert.strictEqual(d.vouchers[0].date, '2026-07-30'); // YYYYMMDD normalized
-    assert.strictEqual(d.vouchers[0].amount, -455000);
+    assert.strictEqual(d.vouchers[0].amount, -45500000);
   });
 
   await check('import: valid export imports in sequence with dedupe', async () => {
@@ -83,7 +83,7 @@ async function check(name, fn) {
     assert.deepStrictEqual(groups.sort((a, b) => a.name.localeCompare(b.name)).map((g) => g.name), ['Bank Accounts', 'Current Liabilities', 'Sundry Creditors']);
     const sai = ledgers.find((l) => l.name === 'Sai Traders & Co');
     assert.strictEqual(sai.group_name, 'Sundry Creditors');
-    assert.strictEqual(sai.opening_balance, 92040);
+    assert.strictEqual(sai.opening_balance, 9204000);
     assert.strictEqual(vouchers[0].voucher_number, 'PV-1');
   });
 
@@ -165,9 +165,9 @@ async function check(name, fn) {
     assert.strictEqual(r.imported.vouchers.imported, 3);
     const vs = await all('SELECT voucher_number, amount FROM tally_vouchers WHERE company_id = ?', [coId]);
     const byNum = Object.fromEntries(vs.map((v) => [v.voucher_number, v.amount]));
-    assert.strictEqual(byNum['PY/24-25/001'], 25000);
-    assert.strictEqual(byNum['JV/24-25/001'], 3500);
-    assert.strictEqual(byNum['CN/24-25/001'], 40000);
+    assert.strictEqual(byNum['PY/24-25/001'], 2500000);
+    assert.strictEqual(byNum['JV/24-25/001'], 350000);
+    assert.strictEqual(byNum['CN/24-25/001'], 4000000);
   });
 
   await check('import: voucher-only export auto-creates ledgers and imports all 6 vouchers', async () => {
@@ -239,12 +239,12 @@ async function check(name, fn) {
 
     const vs = await all('SELECT voucher_number, amount FROM tally_vouchers WHERE company_id = ?', [co2]);
     const byNum = Object.fromEntries(vs.map((v) => [v.voucher_number, v.amount]));
-    assert.strictEqual(byNum['SL/24-25/001'], -116125);
-    assert.strictEqual(byNum['PU/24-25/001'], 246750);
-    assert.strictEqual(byNum['PY/24-25/001'], 25000);
-    assert.strictEqual(byNum['RC/24-25/001'], 75000);
-    assert.strictEqual(byNum['JV/24-25/001'], 3500);
-    assert.strictEqual(byNum['CN/24-25/001'], 40000);
+    assert.strictEqual(byNum['SL/24-25/001'], -11612500);
+    assert.strictEqual(byNum['PU/24-25/001'], 24675000);
+    assert.strictEqual(byNum['PY/24-25/001'], 2500000);
+    assert.strictEqual(byNum['RC/24-25/001'], 7500000);
+    assert.strictEqual(byNum['JV/24-25/001'], 350000);
+    assert.strictEqual(byNum['CN/24-25/001'], 4000000);
   });
 
   await check('import: realistic VCHNUM/VCHDATE voucher imports with derived amount', async () => {
@@ -273,7 +273,7 @@ async function check(name, fn) {
     const v = vs.find((x) => x.voucher_number === 'PV-2026-77');
     assert.ok(v, 'voucher must exist');
     assert.strictEqual(v.date, '2026-07-30');
-    assert.strictEqual(v.amount, 455000);
+    assert.strictEqual(v.amount, 45500000);
   });
 
   await check('import: empty/unsupported XML is rejected', async () => {
@@ -308,7 +308,7 @@ async function check(name, fn) {
     assert.strictEqual(r2.imported.vouchers.updated, 1, JSON.stringify(r2.imported));
     assert.strictEqual(r2.imported.vouchers.imported, 0);
     const v = await get('SELECT amount FROM tally_vouchers WHERE company_id = ? AND voucher_number = ?', [co, 'PY-G/001']);
-    assert.strictEqual(v.amount, 30000);
+    assert.strictEqual(v.amount, 3000000);
 
     const r3 = await TallyImport.handleImport(co, xml(30000, 2)); // true duplicate: same ALTERID
     assert.strictEqual(r3.imported.vouchers.skipped, 1);

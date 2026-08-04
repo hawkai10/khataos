@@ -19,7 +19,8 @@
 //              GSTR-2B payload can enter the system.
 // ============================================================================
 
-const { todayStr, inr, nowIso } = require('./util');
+const { todayStr, nowIso } = require('./util');
+const { Money } = require('./money');
 const { env, hasAll } = require('./config');
 
 // Read at call time so credentials can be set/changed after require.
@@ -144,11 +145,13 @@ async function fetchGstr2bRaw(companyId, period, gstin) {
 // taxable, cgst, sgst, igst) plus totals. Unit-tested with a real fixture.
 function mapGstr2b(payload, opts = {}) {
   // GSP payloads can return amounts as numbers or comma-formatted strings;
-  // normalize both so a live fetch can never poison the ITC totals.
-  const num = (v) => {
+  // parse each to exact integer paise so a live fetch can never poison the
+  // ITC totals with float drift.
+  const paise = (v) => {
     if (v == null) return 0;
-    const n = Number(String(v).replace(/[,\s]/g, ''));
-    return Number.isFinite(n) ? n : 0;
+    const s = String(v).replace(/[,\s]/g, '');
+    if (!s) return 0;
+    try { return Number(Money.fromRupees(s).toPaise()); } catch { return 0; }
   };
   const period = opts.period || payload.fp || payload.period || todayStr().slice(0, 7);
   const gstin = opts.gstin || payload.gstin || null;
@@ -156,11 +159,11 @@ function mapGstr2b(payload, opts = {}) {
   const invoices = b2b.map(r => ({
     invoice_no: String(r.docno || r.doc_num || r.document_number || ''),
     gstin: r.ctin || r.supplier_gstin || null,
-    taxable: inr(num(r.txval)),
-    cgst: inr(num(r.cgst)),
-    sgst: inr(num(r.sgst)),
-    igst: inr(num(r.igst)),
-    cess: inr(num(r.cess)),
+    taxable: paise(r.txval),
+    cgst: paise(r.cgst),
+    sgst: paise(r.sgst),
+    igst: paise(r.igst),
+    cess: paise(r.cess),
     supplier_filed_on: r.supfildt || null,
   })).filter(r => r.invoice_no);
   // GSTR-2B CDNR section: credit/debit notes issued by suppliers. Same row
@@ -169,18 +172,18 @@ function mapGstr2b(payload, opts = {}) {
   const cdnr = (Array.isArray(payload.cdnr) ? payload.cdnr : []).map(r => ({
     invoice_no: String(r.docno || r.doc_num || r.document_number || ''),
     gstin: r.ctin || r.supplier_gstin || null,
-    taxable: inr(num(r.txval)),
-    cgst: inr(num(r.cgst)),
-    sgst: inr(num(r.sgst)),
-    igst: inr(num(r.igst)),
-    cess: inr(num(r.cess)),
+    taxable: paise(r.txval),
+    cgst: paise(r.cgst),
+    sgst: paise(r.sgst),
+    igst: paise(r.igst),
+    cess: paise(r.cess),
     doc_type: r.typ || r.doc_type || null,
   })).filter(r => r.invoice_no);
-  const itc = (k) => inr(invoices.reduce((s, r) => s + (r[k] || 0), 0));
+  const itc = (k) => Money.sum(invoices.map((r) => Money.fromPaise(r[k] || 0))).toPaise();
   return {
     period, gstin,
-    total_itc: inr(itc('cgst') + itc('sgst') + itc('igst')),
-    itc_cgst: itc('cgst'), itc_sgst: itc('sgst'), itc_igst: itc('igst'),
+    total_itc: Number(itc('cgst')) + Number(itc('sgst')) + Number(itc('igst')),
+    itc_cgst: Number(itc('cgst')), itc_sgst: Number(itc('sgst')), itc_igst: Number(itc('igst')),
     invoices,
     cdnr,
     credit_notes: cdnr.length,
@@ -193,6 +196,7 @@ function mapGstr2b(payload, opts = {}) {
 function buildEinvoiceBody(inv, opts = {}) {
   const seller = opts.seller || { gstin: cfg().gstin, name: 'Seller Company Pvt Ltd', addr: 'Bengaluru, Karnataka 560001' };
   const buyer = opts.buyer || { gstin: inv.gstin_vendor || '', name: inv.vendor_name || 'Buyer', addr: '' };
+  const rs = (paise) => Money.fromPaise(paise || 0).toRupees();
   const items = Array.isArray(inv.lines) && inv.lines.length ? inv.lines : [{ hsn: '9988', description: 'Goods & services', qty: 1, rate: inv.taxable_amount || 0, taxable: inv.taxable_amount || 0, cgst: inv.cgst || 0, sgst: inv.sgst || 0, igst: inv.igst || 0 }];
   return {
     Version: '1.03',
@@ -202,13 +206,13 @@ function buildEinvoiceBody(inv, opts = {}) {
     BuyerDtls: { Gstin: buyer.gstin, LglNm: buyer.name, TrdNm: buyer.name, Addr1: buyer.addr || 'Registered Address', Loc: '', Pin: 0, StCd: 0, Ph: '', Em: '' },
     ItemList: items.map((l, i) => ({
       SlNo: i + 1, PrdDesc: l.description || 'Goods & services', HsnCd: String(l.hsn || '9988'), Barcde: '',
-      Qty: l.qty || 1, FreeQty: 0, Unit: 'NOS', UnitPrice: inr(l.rate || 0), TotAmt: inr(l.taxable || 0), Discount: 0,
-      PreGstVal: inr(l.taxable || 0), AssAmt: inr(l.taxable || 0), GstRt: inv.igst ? 18 : 18, CgstAmt: inr(l.cgst || 0), SgstAmt: inr(l.sgst || 0), IgstAmt: inr(l.igst || 0),
+      Qty: l.qty || 1, FreeQty: 0, Unit: 'NOS', UnitPrice: rs(l.rate), TotAmt: rs(l.taxable), Discount: 0,
+      PreGstVal: rs(l.taxable), AssAmt: rs(l.taxable), GstRt: inv.igst ? 18 : 18, CgstAmt: rs(l.cgst), SgstAmt: rs(l.sgst), IgstAmt: rs(l.igst),
       CesAmt: 0, StateCesAmt: 0, StateCesRt: 0, CesNonAdvolAmt: 0, TotInvValFc: 0,
     })),
     ValDtls: {
-      AssVal: inr(inv.taxable_amount || 0), CgstVal: inr(inv.cgst || 0), SgstVal: inr(inv.sgst || 0), IgstVal: inr(inv.igst || 0),
-      CesVal: 0, StateCesVal: 0, Discount: 0, OthChrg: 0, RndOffAmt: 0, TotInvVal: inr(inv.gross_amount || 0), TotInvValFc: inr(inv.gross_amount || 0),
+      AssVal: rs(inv.taxable_amount), CgstVal: rs(inv.cgst), SgstVal: rs(inv.sgst), IgstVal: rs(inv.igst),
+      CesVal: 0, StateCesVal: 0, Discount: 0, OthChrg: 0, RndOffAmt: 0, TotInvVal: rs(inv.gross_amount), TotInvValFc: rs(inv.gross_amount),
     },
     EwbDtls: null,
   };

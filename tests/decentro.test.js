@@ -44,19 +44,19 @@ check('mapStatement: two rows mapped', () => {
 
 check('mapStatement: debit amount is negative', () => {
   const out = Decentro.mapStatement(STATEMENT_FIXTURE.data);
-  assert.strictEqual(out.rows[0].amount, -100);
+  assert.strictEqual(out.rows[0].amount, -10000); // -100 rupees -> paise
 });
 
 check('mapStatement: credit amount is positive with UPI mode', () => {
   const out = Decentro.mapStatement(STATEMENT_FIXTURE.data);
-  assert.strictEqual(out.rows[1].amount, 100);
+  assert.strictEqual(out.rows[1].amount, 10000); // 100 rupees -> paise
   assert.strictEqual(out.rows[1].mode, 'UPI');
 });
 
 check('mapStatement: dates and balances mapped', () => {
   const out = Decentro.mapStatement(STATEMENT_FIXTURE.data);
   assert.strictEqual(out.rows[0].txn_date, '2020-10-02');
-  assert.strictEqual(out.rows[0].balance_after, 100);
+  assert.strictEqual(out.rows[0].balance_after, 10000); // 100 rupees -> paise
   assert.strictEqual(out.rows[0].external_id, 'S2XXXXXXX');
 });
 

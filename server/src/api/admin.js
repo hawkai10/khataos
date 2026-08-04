@@ -5,7 +5,7 @@
 
 const { all, get, insert, run, update } = require('../db');
 const dbModule = require('../db');
-const { nowIso, todayStr, inr, formatINR } = require('../util');
+const { nowIso, todayStr, round2, formatINR } = require('../util');
 const { ApiError, login, logout, tokenFrom, requireRole, audit, recentAudit, publicUser, sessionCookie, clearSessionCookie } = require('../auth');
 const { TallyConnector } = require('../adapters');
 const Decentro = require('../decentro');
@@ -17,7 +17,7 @@ const Company = require('../services/company');
 const Gst = require('../services/gst');
 const Invoices = require('../services/invoices');
 const { bodyOf, requireNonEmptyString } = require('./validators');
-const { companyOf } = require('./helpers');
+const { companyOf, rupees, publicizeRows } = require('./helpers');
 
 async function register(fastify) {
   // ===================== AUTH =====================
@@ -70,12 +70,12 @@ async function register(fastify) {
     const lastBankSync = await Cash.lastBankSync(coId);
 
     reply.ok({
-      cash: { available, uncleared, accounts, runway_months: runwayMonths, monthly_burn: monthlyBurn, last_synced_at: lastBankSync },
-      payments: { due_this_week: { count: due.length, amount: dueAmount }, overdue: { count: overdue.length, amount: overdueAmount } },
-      gst: { itc: g.itc, liability: gstLiability, open_mismatches: mismatches, period: g.period, fetched_at: g.fetched_at },
+      cash: { available: rupees(available), uncleared: rupees(uncleared), accounts, runway_months: runwayMonths, monthly_burn: rupees(monthlyBurn), last_synced_at: lastBankSync },
+      payments: { due_this_week: { count: due.length, amount: rupees(dueAmount) }, overdue: { count: overdue.length, amount: rupees(overdueAmount) } },
+      gst: { itc: rupees(g.itc), liability: rupees(gstLiability), open_mismatches: mismatches, period: g.period, fetched_at: g.fetched_at },
       recon: { ...reconScore, as_of: lastBankSync },
       tally,
-      trend,
+      trend: publicizeRows(trend, 'cash_daily'),
       kpis: [
         { key: 'cash', label: 'Available cash', value: formatINR(available), sub: `+ ₹${formatINR(uncleared)} uncleared` },
         { key: 'due', label: 'Due this week', value: `${due.length} payments`, sub: formatINR(dueAmount), alert: dueAmount > 0 },
@@ -152,13 +152,13 @@ async function register(fastify) {
       try { firstId = JSON.parse(p.invoice_ids || '[]')[0]; } catch { /* ignore */ }
       return { ...p, invoice_date: invDateMap[firstId] || p.initiated_at.slice(0, 10) };
     });
-    const cycleDays = completed.length ? inr(completed.reduce((s, p) => {
+    const cycleDays = completed.length ? round2(completed.reduce((s, p) => {
       const received = p.invoice_date || p.initiated_at.slice(0, 10);
       const processed = p.processed_at.slice(0, 10);
       return s + Math.max(0, Math.round((new Date(processed) - new Date(received)) / 86400000));
     }, 0) / completed.length) : null;
     const baseline = 11.2;
-    const improvement = cycleDays != null ? inr(((baseline - cycleDays) / baseline) * 100) : null;
+    const improvement = cycleDays != null ? round2(((baseline - cycleDays) / baseline) * 100) : null;
     const today = todayStr();
     const usage = await get('SELECT * FROM usage_daily WHERE company_id = ? AND date = ?', [coId, today]);
     const dau = usage ? usage.dau : 0;
@@ -169,7 +169,7 @@ async function register(fastify) {
       tally_uptime: tally.uptime_30d, target_uptime: 99.5,
       recon: { accuracy: score.accuracy, target: 70 },
       cycle: { avg_days: cycleDays, baseline_days: baseline, improvement_pct: improvement, target_pct: 50 },
-      engagement: { dau, mau: 3, daumau_pct: inr((dau / 3) * 100), target_pct: 60 },
+      engagement: { dau, mau: 3, daumau_pct: round2((dau / 3) * 100), target_pct: 60 },
     });
   });
 

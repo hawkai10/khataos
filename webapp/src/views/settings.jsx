@@ -38,7 +38,7 @@ export function Settings({ user }) {
     }
   }
 
-  const set = (k) => (e) => setSettings({ ...settings, [k]: Number(e.target.value) || 0 });
+  const set = (k) => (e) => setSettings({ ...settings, [k]: e.target.value === '' ? 0 : String(e.target.value) });
 
   return (
     <div className="space-y-5">

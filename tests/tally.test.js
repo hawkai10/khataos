@@ -31,7 +31,7 @@ check('parse: real voucher export — VCHNUM, DATE, VCHTYPE attr, entries', () =
   assert.strictEqual(v.voucher_number, 'PV-1'); // <VCHNUM> mapped
   assert.strictEqual(v.voucher_type, 'Payment'); // <VOUCHERTYPENAME> wins
   assert.strictEqual(v.date, '2026-07-30'); // YYYYMMDD normalized
-  assert.strictEqual(v.amount, 455000); // party-ledger entry amount
+  assert.strictEqual(v.amount, 45500000); // party-ledger entry amount (paise)
   assert.strictEqual(v.party_name, 'Global Freight LLP');
   assert.strictEqual(v.entries.length, 2);
 });
@@ -49,7 +49,7 @@ check('parse: official Tally sample XML — mixed-case tags, PARTYNAME, LEDGEREN
   const v = d.vouchers[0];
   assert.strictEqual(v.voucher_number, 'PV-2');
   assert.strictEqual(v.party_name, 'Customer ABC'); // <PARTYNAME> fallback when PARTYLEDGERNAME absent
-  assert.strictEqual(v.amount, 25000); // party entry read through <LEDGERENTRIES.LIST>
+  assert.strictEqual(v.amount, 2500000); // party entry read through <LEDGERENTRIES.LIST>
   assert.strictEqual(v.entries.length, 2);
 });
 
@@ -61,14 +61,14 @@ check('parse: voucher-register export — flat LEDGERENTRIES.LIST + inventory al
   assert.strictEqual(d.vouchers.length, 5);
   const byNum = Object.fromEntries(d.vouchers.map((v) => [v.voucher_number, v]));
   const sl = byNum['SL/24-25/001'];
-  assert.strictEqual(sl.amount, -116125); // party entry wins over allocation amounts
+  assert.strictEqual(sl.amount, -11612500); // party entry wins over allocation amounts
   assert.strictEqual(sl.party_name, 'Sharma Enterprises');
   assert.strictEqual(sl.entries.length, 4); // Sales Account + CGST + SGST + party
-  assert.strictEqual(byNum['PY/24-25/001'].amount, 25000); // bank party entry
-  assert.strictEqual(byNum['RC/24-25/001'].amount, 75000);
-  assert.strictEqual(byNum['JV/24-25/001'].amount, 3500); // no party -> largest, positive tie
+  assert.strictEqual(byNum['PY/24-25/001'].amount, 2500000); // bank party entry
+  assert.strictEqual(byNum['RC/24-25/001'].amount, 7500000);
+  assert.strictEqual(byNum['JV/24-25/001'].amount, 350000); // no party -> largest, positive tie
   assert.strictEqual(byNum['JV/24-25/001'].party_name, null);
-  assert.strictEqual(byNum['CN/24-25/001'].amount, 40000);
+  assert.strictEqual(byNum['CN/24-25/001'].amount, 4000000);
 });
 
 check('parse: VCHDATE + attribute-only type + entries-derived amount', () => {
@@ -78,13 +78,13 @@ check('parse: VCHDATE + attribute-only type + entries-derived amount', () => {
   assert.strictEqual(v.voucher_number, 'RC-9');
   assert.strictEqual(v.voucher_type, 'Receipt'); // from VCHTYPE attribute
   assert.strictEqual(v.date, '2026-08-01');
-  assert.strictEqual(v.amount, -125000); // party entry (Nexus, -125000) drives the amount
+  assert.strictEqual(v.amount, -12500000); // party entry (Nexus, -125000) drives the amount
 });
 
 check('parse: BOM, XML declaration and missing ENVELOPE are tolerated', () => {
   const d = Tally.parseExport(RAW_VOUCHER);
   assert.strictEqual(d.vouchers.length, 1);
-  assert.strictEqual(d.vouchers[0].amount, 1000); // explicit <AMOUNT> wins
+  assert.strictEqual(d.vouchers[0].amount, 100000); // explicit <AMOUNT> wins (paise)
 });
 
 check('parse: GUID, ALTERID and ISCANCELLED survive the new parser intact', () => {
@@ -103,7 +103,7 @@ check('parse: GUID, ALTERID and ISCANCELLED survive the new parser intact', () =
   assert.strictEqual(v.voucher_number, 'PU-1');
   assert.strictEqual(v.voucher_type, 'Purchase');
   assert.strictEqual(v.date, '2026-07-30');
-  assert.strictEqual(v.amount, 118000);
+  assert.strictEqual(v.amount, 11800000);
   assert.strictEqual(v.tally_guid, 'g-vch');
   assert.strictEqual(v.tally_alterid, 7);
   assert.strictEqual(v.cancelled, true);
@@ -161,24 +161,24 @@ check('date normalization: YYYYMMDD and YYYY-MM-DD; invalid -> null', () => {
 
 check('voucher builder: purchase voucher with GST/TDS entries', () => {
   const xml = Tally.buildPurchaseVoucher(
-    { invoice_no: 'INV-2026-118', invoice_date: '2026-08-02', gross_amount: 2119010, taxable_amount: 1850000, cgst: 158760, sgst: 166500, igst: 0, tds_amount: 46250, net_payable: 2072760 },
+    { invoice_no: 'INV-2026-118', invoice_date: '2026-08-02', gross_amount: 211901000, taxable_amount: 185000000, cgst: 15876000, sgst: 16650000, igst: 0, tds_amount: 4625000, net_payable: 207276000 },
     { ledger_name: 'Sundry Creditors - Shree Cement', name: 'Shree Cement Traders' }
   );
   assert.ok(xml.includes('VCHTYPE="Purchase"'));
   assert.ok(xml.includes('<LEDGERNAME>Input CGST</LEDGERNAME>'));
   assert.ok(xml.includes('<LEDGERNAME>Input SGST</LEDGERNAME>'));
   assert.ok(xml.includes('<LEDGERNAME>TDS Payable</LEDGERNAME>'));
-  assert.ok(xml.includes('<AMOUNT>2072760</AMOUNT>'));
+  assert.ok(xml.includes('<AMOUNT>2072760.00</AMOUNT>'));
 });
 
 check('voucher builder: payment voucher debits bank', () => {
   const xml = Tally.buildPaymentVoucher(
-    { reference: 'NEFT-99012345', amount: 455000, net_amount: 445900, processed_at: '2026-08-03T09:00:00Z' },
+    { reference: 'NEFT-99012345', amount: 45500000, net_amount: 44590000, processed_at: '2026-08-03T09:00:00Z' },
     { ledger_name: 'Sundry Creditors - Global Freight', name: 'Global Freight LLP' }
   );
   assert.ok(xml.includes('VCHTYPE="Payment"'));
   assert.ok(xml.includes('<LEDGERNAME>Bank</LEDGERNAME>'));
-  assert.ok(xml.includes('<AMOUNT>-445900</AMOUNT>'));
+  assert.ok(xml.includes('<AMOUNT>-445900.00</AMOUNT>'));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

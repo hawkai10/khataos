@@ -7,6 +7,7 @@
 
 const { insert } = require('./db');
 const { hashPassword, uid, nowIso, todayStr } = require('./util');
+const { Money } = require('./money');
 
 async function bootstrapTestTenant() {
   const coId = 'co_smoke';
@@ -36,7 +37,7 @@ async function registerTestHooks(fastify) {
     await insert('bank_transactions', {
       id: b.id || uid('btx'), company_id: request.user.company_id, account_id: b.account_id || 'acc_smoke',
       external_id: b.external_id || 'EXT-' + Date.now(), txn_date: b.txn_date || todayStr(),
-      amount: Number(b.amount) || 0, description: b.description || '', mode: b.mode || 'NEFT',
+      amount: Number(Money.fromRupees(b.amount || 0).toPaise()), description: b.description || '', mode: b.mode || 'NEFT',
       ref_no: b.ref_no || null, status: 'posted', matched: 0, created_at: nowIso(),
     });
     reply.ok({ inserted: true });

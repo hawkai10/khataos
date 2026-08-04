@@ -11,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { ModeBadge } from '../components/status-badge.jsx';
 import { get, post } from '../lib/api.js';
 import { inr, fmtDate, signedInr } from '../lib/format.js';
+import { signRupees } from '../lib/money.js';
 import { PageHeader } from '../components/page-header.jsx';
 
 export function Recon({ user }) {
@@ -119,7 +120,7 @@ export function Recon({ user }) {
                   </TableCell>
                   <TableCell><ModeBadge mode={t.mode} /></TableCell>
                   <TableCell className="text-xs text-muted-foreground">{t.bank_name}</TableCell>
-                  <TableCell className={`num text-right font-medium ${Number(t.amount) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{signedInr(t.amount)}</TableCell>
+                  <TableCell className={`num text-right font-medium ${signRupees(t.amount) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{signedInr(t.amount)}</TableCell>
                   <TableCell>
                     {t.suggested_payment ? (
                       <div className="text-xs">

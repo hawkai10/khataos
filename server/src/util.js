@@ -1,5 +1,7 @@
 'use strict';
 
+const { Money } = require('./money');
+
 // ---- deterministic PRNG (mulberry32) so demo data is stable per seed ----
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -43,14 +45,16 @@ function minsSince(iso) {
 
 function nowIso() { return new Date().toISOString(); }
 
-// ---- money ----
-function inr(amount) { return Number(amount.toFixed(2)); }
+// ---- money (all amounts are integer paise; format only, never arithmetic) ----
+// Round a NON-money number (percentage, days, ratio) to 2 decimals. Never use
+// this for amounts — amounts are exact integer paise and go through Money.
+function round2(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
 
-// Indian number formatting: 12,34,567.89
+// Indian number formatting on paise: 12,34,567.89
 function formatINR(amount) {
-  const neg = amount < 0;
-  const v = Math.abs(amount);
-  const s = v.toFixed(2);
+  const m = amount instanceof Money ? amount : Money.fromPaise(amount);
+  const neg = m.isNegative();
+  const s = m.abs().toRupees();
   const [intPart, decPart] = s.split('.');
   const last3 = intPart.slice(-3);
   const rest = intPart.slice(0, -3);
@@ -90,5 +94,5 @@ function verifyPassword(pw, stored) {
 
 module.exports = {
   mulberry32, todayStr, daysAgo, daysAhead, addDays, diffDays, minsSince, nowIso,
-  inr, formatINR, uid, shortRef, hashPassword, verifyPassword,
+  round2, formatINR, uid, shortRef, hashPassword, verifyPassword,
 };

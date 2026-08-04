@@ -46,11 +46,11 @@ const EINVOICE = {
   invoice_date: '2026-08-03',
   gstin_vendor: '24ACRPP7935N1ZO',
   vendor_name: 'Vendor One',
-  taxable_amount: 26250,
-  cgst: 2362.5,
-  sgst: 2362.5,
+  taxable_amount: 2625000,
+  cgst: 236250,
+  sgst: 236250,
   igst: 0,
-  gross_amount: 30975,
+  gross_amount: 3097500,
 };
 
 let passed = 0, failed = 0;
@@ -124,26 +124,26 @@ async function check(name, fn) {
     assert.strictEqual(out.invoices.length, 2);
     assert.strictEqual(out.invoices[0].invoice_no, 'INV-2024-118');
     assert.strictEqual(out.invoices[0].gstin, '24ACRPP7935N1ZO');
-    assert.strictEqual(out.invoices[0].taxable, 26250);
-    assert.strictEqual(out.invoices[1].cgst, 48600);
+    assert.strictEqual(out.invoices[0].taxable, 2625000); // paise
+    assert.strictEqual(out.invoices[1].cgst, 4860000); // paise
     assert.strictEqual(out.source, 'gstn-live');
   });
 
   await check('gstr2b: ITC totals aggregate across rows', () => {
     const out = Gstn.mapGstr2b(GSTR2B_FIXTURE, { period: '122024' });
-    assert.strictEqual(out.itc_cgst, 50962.5);
-    assert.strictEqual(out.itc_sgst, 50962.5);
+    assert.strictEqual(out.itc_cgst, 5096250);
+    assert.strictEqual(out.itc_sgst, 5096250);
     assert.strictEqual(out.itc_igst, 0);
-    assert.strictEqual(out.total_itc, 101925);
+    assert.strictEqual(out.total_itc, 10192500);
   });
 
   await check('gstr2b: comma-formatted string amounts normalize', () => {
     const out = Gstn.mapGstr2b({
       b2b: [{ ctin: '24ACRPP7935N1ZO', docno: 'INV-9', txval: '26,250.00', cgst: '2,362.50', sgst: '2,362.50', igst: '0', cess: '0' }],
     }, { period: '122024' });
-    assert.strictEqual(out.invoices[0].taxable, 26250);
-    assert.strictEqual(out.invoices[0].cgst, 2362.5);
-    assert.strictEqual(out.total_itc, 4725);
+    assert.strictEqual(out.invoices[0].taxable, 2625000);
+    assert.strictEqual(out.invoices[0].cgst, 236250);
+    assert.strictEqual(out.total_itc, 472500);
   });
 
   await check('gstr2b: empty payload yields zero rows and current period', () => {
@@ -166,11 +166,11 @@ async function check(name, fn) {
     assert.strictEqual(out.credit_notes, 2);
     assert.strictEqual(out.cdnr[0].invoice_no, 'CN-2024-1');
     assert.strictEqual(out.cdnr[0].gstin, '24ACRPP7935N1ZO');
-    assert.strictEqual(out.cdnr[0].taxable, 20000);
+    assert.strictEqual(out.cdnr[0].taxable, 2000000);
     assert.strictEqual(out.cdnr[0].doc_type, 'C');
-    assert.strictEqual(out.cdnr[1].taxable, 10000); // comma-formatted normalized
+    assert.strictEqual(out.cdnr[1].taxable, 1000000); // comma-formatted normalized
     assert.strictEqual(out.cdnr[1].doc_type, 'D');
-    assert.strictEqual(out.total_itc, 101925); // CDNR rows do not inflate ITC totals
+    assert.strictEqual(out.total_itc, 10192500); // CDNR rows do not inflate ITC totals
   });
 
   // ---- e-invoice (IRP) contract stub ----
@@ -186,7 +186,7 @@ async function check(name, fn) {
     assert.strictEqual(body.DocDtls.No, 'INV-2026-101');
     assert.strictEqual(body.ItemList.length, 1);
     assert.strictEqual(body.ItemList[0].HsnCd, '9988');
-    assert.strictEqual(body.ValDtls.TotInvVal, 30975);
+    assert.strictEqual(body.ValDtls.TotInvVal, '30975.00');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

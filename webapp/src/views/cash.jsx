@@ -16,6 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.
 import { ModeBadge } from '../components/status-badge.jsx';
 import { get, post } from '../lib/api.js';
 import { inr, fmtDate, signedInr, fmtDateTime } from '../lib/format.js';
+import { sumRupees, toRupees, signRupees } from '../lib/money.js';
 import { PageHeader } from '../components/page-header.jsx';
 
 export function Cash() {
@@ -61,8 +62,8 @@ export function Cash() {
     }
   }
 
-  const total = accounts.reduce((s, a) => s + Number(a.balance || 0), 0);
-  const uncleared = accounts.reduce((s, a) => s + Number(a.uncleared || 0), 0);
+  const total = sumRupees(accounts.map((a) => a.balance || '0.00'));
+  const uncleared = sumRupees(accounts.map((a) => a.uncleared || '0.00'));
   const lastSync = accounts.map((a) => a.last_synced_at).filter(Boolean).sort().pop();
 
   return (
@@ -82,8 +83,8 @@ export function Cash() {
       />
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <KpiCard icon={Landmark} label="Total available" value={inr(total)} sub={`${accounts.length} accounts · ${accounts.filter((a) => a.source === 'decentro').length} via Decentro`} />
-        <KpiCard icon={ShieldCheck} label="Uncleared funds" value={inr(uncleared)} sub="Cheques / credits in clearing" accent="bg-amber-100 text-amber-800" />
+        <KpiCard icon={Landmark} label="Total available" value={inr(toRupees(total))} sub={`${accounts.length} accounts · ${accounts.filter((a) => a.source === 'decentro').length} via Decentro`} />
+        <KpiCard icon={ShieldCheck} label="Uncleared funds" value={inr(toRupees(uncleared))} sub="Cheques / credits in clearing" accent="bg-amber-100 text-amber-800" />
         <KpiCard icon={ArrowDownUp} label="Last 7-day activity" value={String(txns.length)} sub="transactions across all accounts" accent="bg-sky-100 text-sky-800" />
       </div>
 
@@ -152,7 +153,7 @@ export function Cash() {
                       </TableCell>
                       <TableCell><ModeBadge mode={t.mode} /></TableCell>
                       <TableCell className="num text-xs text-muted-foreground">{t.ref_no || '—'}</TableCell>
-                      <TableCell className={`num text-right font-medium ${Number(t.amount) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{signedInr(t.amount)}</TableCell>
+                      <TableCell className={`num text-right font-medium ${signRupees(t.amount) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{signedInr(t.amount)}</TableCell>
                       <TableCell className="num text-right text-muted-foreground">{t.balance_after != null ? inr(t.balance_after) : '—'}</TableCell>
                     </TableRow>
                   ))}

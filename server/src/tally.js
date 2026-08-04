@@ -42,6 +42,7 @@
 // ============================================================================
 
 const { XMLParser } = require('fast-xml-parser');
+const { Money } = require('./money');
 
 // ---- XML escaping (builders only) ----
 const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -50,7 +51,7 @@ const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
-  parseTagValue: false,      // keep raw strings; num() owns number coercion
+  parseTagValue: false,      // keep raw strings; paiseOf() owns money coercion
   parseAttributeValue: false,
   trimValues: true,
 });
@@ -140,8 +141,23 @@ function firstValueOf(root, name) {
   return found;
 }
 
-// Parse a number safely: null when missing/empty/non-numeric, otherwise the
-// value with commas/whitespace stripped. Never throws.
+// Parse a decimal amount string to integer paise (exact, BigInt based).
+// Null when missing/empty/invalid; tolerates commas/whitespace and sub-paise
+// digits by rounding half away from zero — never via floating point.
+function paiseOf(v) {
+  if (v == null || String(v).trim() === '') return null;
+  const s = String(v).replace(/[,\s]/g, '');
+  const m = /^(-?)(\d+)(?:\.(\d*))?$/.exec(s);
+  if (!m) return null;
+  const neg = m[1] === '-';
+  const int = BigInt(m[2]);
+  const frac = m[3] || '';
+  let paise = int * 100n + BigInt((frac + '00').slice(0, 2));
+  if (frac.length > 2 && BigInt(frac[2]) >= 5n) paise += 1n;
+  return Number(neg ? -paise : paise);
+}
+
+// Parse a non-money integer id safely (e.g. ALTERID). Never used for amounts.
 function num(v) {
   if (v == null || String(v).trim() === '') return null;
   const n = Number(String(v).replace(/[,\s]/g, ''));
@@ -178,7 +194,7 @@ function voucherBalance(v) {
     const isDebit = e.positive != null ? e.positive : (e.amount != null && e.amount < 0);
     if (isDebit) debit += amt; else credit += amt;
   }
-  return { debit, credit, balanced: Math.abs(debit - credit) < 0.01 };
+  return { debit, credit, balanced: debit === credit };
 }
 
 // Voucher ledger entries appear in several real Tally export shapes:
@@ -190,7 +206,7 @@ function extractEntries(voucherNode) {
   const parseEntry = (e) => {
     const ledger = valueOf(e, 'LEDGERNAME');
     if (!ledger) return null;
-    const amount = num(valueOf(e, 'AMOUNT'));
+    const amount = paiseOf(valueOf(e, 'AMOUNT'));
     const posRaw = valueOf(e, 'ISDEEMEDPOSITIVE');
     const positive = /^yes$/i.test(posRaw || '') ? true : /^no$/i.test(posRaw || '') ? false : null;
     const billRefs = blocksOf(e, 'BILLALLOCATIONS.LIST').map((b) => valueOf(b, 'NAME')).filter(Boolean);
@@ -245,7 +261,7 @@ function parseExport(xml) {
     out.ledgers.push({
       name,
       group_name: valueOf(b, 'PARENT') || null,
-      opening_balance: num(valueOf(b, 'OPENINGBALANCE')) ?? 0,
+      opening_balance: paiseOf(valueOf(b, 'OPENINGBALANCE')) ?? 0,
       gstin: valueOf(b, 'GSTIN') || null,
       tally_guid: valueOf(b, 'GUID') || null,
       tally_alterid: num(valueOf(b, 'ALTERID')) || 0,
@@ -258,7 +274,7 @@ function parseExport(xml) {
     // so they can never be confused with voucher-level values.
     const party = valueOf(v, 'PARTYLEDGERNAME') || valueOf(v, 'PARTYNAME') || null;
     const entries = extractEntries(v);
-    const explicit = num(valueOf(v, 'AMOUNT'));
+    const explicit = paiseOf(valueOf(v, 'AMOUNT'));
     out.vouchers.push({
       voucher_number: valueOf(v, 'VOUCHERNUMBER') || valueOf(v, 'VCHNUM') || null,
       voucher_type: valueOf(v, 'VOUCHERTYPENAME') || attrOf(v, 'VCHTYPE') || null,
@@ -289,7 +305,7 @@ function buildPurchaseVoucher(inv, vendor) {
   if (igst) entries.push(['Input IGST', -igst]);
   if (tds) entries.push(['TDS Payable', tds]);
   const ledgers = entries
-    .map(([name, amt]) => `      <LEDGERENTRY>\n        <LEDGERNAME>${esc(name)}</LEDGERNAME>\n        <AMOUNT>${Number(amt) || 0}</AMOUNT>\n      </LEDGERENTRY>`)
+    .map(([name, amt]) => `      <LEDGERENTRY>\n        <LEDGERNAME>${esc(name)}</LEDGERNAME>\n        <AMOUNT>${Money.fromPaise(amt || 0).toRupees()}</AMOUNT>\n      </LEDGERENTRY>`)
     .join('\n');
   return (
     `<VOUCHER VCHTYPE="Purchase" ACTION="Create">\n` +
@@ -311,8 +327,8 @@ function buildPaymentVoucher(payment, vendor) {
     `  <VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>\n` +
     `  <PARTYLEDGERNAME>${esc(party)}</PARTYLEDGERNAME>\n` +
     `  <LEDGERENTRIES>\n` +
-    `      <LEDGERENTRY><LEDGERNAME>${esc(party)}</LEDGERNAME><AMOUNT>${Number(payment.amount) || 0}</AMOUNT></LEDGERENTRY>\n` +
-    `      <LEDGERENTRY><LEDGERNAME>Bank</LEDGERNAME><AMOUNT>-${Number(payment.net_amount) || 0}</AMOUNT></LEDGERENTRY>\n` +
+    `      <LEDGERENTRY><LEDGERNAME>${esc(party)}</LEDGERNAME><AMOUNT>${Money.fromPaise(payment.amount || 0).toRupees()}</AMOUNT></LEDGERENTRY>\n` +
+    `      <LEDGERENTRY><LEDGERNAME>Bank</LEDGERNAME><AMOUNT>-${Money.fromPaise(payment.net_amount || 0).toRupees()}</AMOUNT></LEDGERENTRY>\n` +
     `  </LEDGERENTRIES>\n` +
     `</VOUCHER>`
   );

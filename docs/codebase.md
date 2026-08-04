@@ -51,8 +51,19 @@ Drizzle descriptor in `src/db/schema.js` mirrors it one-to-one and generates
 both dialect variants (`schema-sqlite.js`, `schema-pg.js`). On boot the custom
 layer applies the base schema, best-effort `ALTER`s, then **versioned
 migrations** recorded in `schema_migrations` (v1: invoice-number uniqueness
-with dedupe guard; v2: composite indexes). Drizzle migrations live in
-`server/drizzle/{sqlite,pg}` and are applied via `getDrizzle()`.
+with dedupe guard; v2: composite indexes; v3: legacy rupee → paise money
+conversion). Drizzle migrations live in `server/drizzle/{sqlite,pg}` and are
+applied via `getDrizzle()`.
+
+**Money model:** every amount is stored as integer paise — `BIGINT` on
+PostgreSQL, `INTEGER` on SQLite — and all arithmetic goes through the `Money`
+value object (`server/src/money.js`, BigInt-backed: `fromRupees` parses
+decimal strings exactly, `plus`/`minus`/`percentBps`/`equals` are exact, and
+`toRupees()` emits rupee decimal strings). The JSON API exposes money as
+rupee decimal strings (e.g. `"59000.00"`). Reconciliation matches to the
+paisa; the only permitted amount slack is the explicit, configurable
+inward-remittance bank-charge rule (`RECON_BANK_FEE_TOLERANCE_PAISE`, default
+0 = exact), applied to bank credits only.
 
 **Migration status:** the Tally import pipeline is fully converted to Drizzle
 queries; all other modules still use the custom wrapper. Both coexist during

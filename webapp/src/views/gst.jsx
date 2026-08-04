@@ -12,6 +12,7 @@ import { Input } from '../components/ui/input.jsx';
 import { Label } from '../components/ui/label.jsx';
 import { get, post, download } from '../lib/api.js';
 import { inr, fmtDate, fmtDateTime } from '../lib/format.js';
+import { signRupees } from '../lib/money.js';
 import { PageHeader } from '../components/page-header.jsx';
 
 export function Gst() {
@@ -99,7 +100,7 @@ export function Gst() {
                     <TableCell className="max-w-[140px] truncate" title={m.vendor_name}>{m.vendor_name || m.vendor_gstin}</TableCell>
                     <TableCell className="num text-right">{inr(m.platform_amount)}</TableCell>
                     <TableCell className="num text-right">{inr(m.gstr2b_amount)}</TableCell>
-                    <TableCell className={`num text-right font-semibold ${Number(m.variance) > 0 ? 'text-red-600' : 'text-emerald-700'}`}>{inr(m.variance)}</TableCell>
+                    <TableCell className={`num text-right font-semibold ${signRupees(m.variance) > 0 ? 'text-red-600' : 'text-emerald-700'}`}>{inr(m.variance)}</TableCell>
                     <TableCell className="max-w-[220px] truncate text-xs text-muted-foreground" title={m.note}>{m.note}</TableCell>
                   </TableRow>
                 ))}

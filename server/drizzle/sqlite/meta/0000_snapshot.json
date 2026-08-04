@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "04fd51ff-001d-4ace-b490-e1d3bed05121",
+  "id": "0966100f-8f8d-4f91-a213-664126045af7",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "companies": {
@@ -523,14 +523,14 @@
         },
         "amount": {
           "name": "amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
         "balance_after": {
           "name": "balance_after",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -674,7 +674,7 @@
         },
         "closing_balance": {
           "name": "closing_balance",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -913,7 +913,7 @@
         },
         "gross_amount": {
           "name": "gross_amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
@@ -921,7 +921,7 @@
         },
         "taxable_amount": {
           "name": "taxable_amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
@@ -929,7 +929,7 @@
         },
         "cgst": {
           "name": "cgst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -937,7 +937,7 @@
         },
         "sgst": {
           "name": "sgst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -945,7 +945,7 @@
         },
         "igst": {
           "name": "igst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -953,7 +953,7 @@
         },
         "cess": {
           "name": "cess",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -961,7 +961,7 @@
         },
         "tds_amount": {
           "name": "tds_amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -969,7 +969,7 @@
         },
         "net_payable": {
           "name": "net_payable",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1168,7 +1168,7 @@
         },
         "rate": {
           "name": "rate",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1176,7 +1176,7 @@
         },
         "taxable": {
           "name": "taxable",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1184,7 +1184,7 @@
         },
         "cgst": {
           "name": "cgst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1192,7 +1192,7 @@
         },
         "sgst": {
           "name": "sgst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1200,7 +1200,7 @@
         },
         "igst": {
           "name": "igst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1208,7 +1208,7 @@
         },
         "cess": {
           "name": "cess",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1372,7 +1372,7 @@
         },
         "amount": {
           "name": "amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -1449,7 +1449,7 @@
         },
         "tds_amount": {
           "name": "tds_amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1457,7 +1457,7 @@
         },
         "net_amount": {
           "name": "net_amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -1682,7 +1682,7 @@
         },
         "total_itc": {
           "name": "total_itc",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1690,7 +1690,7 @@
         },
         "itc_cgst": {
           "name": "itc_cgst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1698,7 +1698,7 @@
         },
         "itc_sgst": {
           "name": "itc_sgst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1706,7 +1706,7 @@
         },
         "itc_igst": {
           "name": "itc_igst",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1806,7 +1806,7 @@
         },
         "platform_amount": {
           "name": "platform_amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1814,7 +1814,7 @@
         },
         "gstr2b_amount": {
           "name": "gstr2b_amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -1822,7 +1822,7 @@
         },
         "variance": {
           "name": "variance",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -2482,7 +2482,7 @@
         },
         "opening_balance": {
           "name": "opening_balance",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,
@@ -2574,7 +2574,7 @@
         },
         "amount": {
           "name": "amount",
-          "type": "real",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false,

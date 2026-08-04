@@ -17,7 +17,7 @@
 const { getDrizzle, DB_ENGINE } = require('./db');
 const { sqlite, pg } = require('./db/schema');
 const { eq } = require('drizzle-orm');
-const { uid, nowIso } = require('./util');
+const { uid, nowIso, formatINR } = require('./util');
 const Tally = require('./tally');
 
 // Drizzle schema for the active engine (single-engine per process, mirroring
@@ -133,7 +133,7 @@ async function validateExport(companyId, data) {
       if (!bal.balanced) {
         errors.push({
           level: 'error', type: 'voucher', record: ref,
-          message: `Voucher ${ref} unbalanced: debit \u20B9${bal.debit.toLocaleString('en-IN')} / credit \u20B9${bal.credit.toLocaleString('en-IN')}`,
+          message: `Voucher ${ref} unbalanced: debit ${formatINR(bal.debit)} / credit ${formatINR(bal.credit)}`,
         });
       }
     }

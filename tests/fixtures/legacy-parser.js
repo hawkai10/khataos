@@ -35,6 +35,22 @@ function tag(xml, name) {
 
 function num(v) {
   if (v == null || String(v).trim() === '') return null;
+  const s = String(v).replace(/[,\s]/g, '');
+  const m = /^(-?)(\d+)(?:\.(\d*))?$/.exec(s);
+  if (!m) return null;
+  // Frozen reference parser now mirrors the money model: decimal rupees ->
+  // integer paise, so the equivalence test compares like-for-like.
+  const neg = m[1] === '-';
+  const int = BigInt(m[2]);
+  const frac = m[3] || '';
+  let paise = int * 100n + BigInt((frac + '00').slice(0, 2));
+  if (frac.length > 2 && BigInt(frac[2]) >= 5n) paise += 1n;
+  return Number(neg ? -paise : paise);
+}
+
+// Non-money integer ids (ALTERID) — never amounts.
+function intOf(v) {
+  if (v == null || String(v).trim() === '') return null;
   const n = Number(String(v).replace(/[,\s]/g, ''));
   return Number.isFinite(n) ? n : null;
 }
@@ -110,7 +126,7 @@ function parseExport(xml) {
       name,
       parent: tag(b, 'PARENT') || null,
       tally_guid: tag(b, 'GUID') || null,
-      tally_alterid: num(tag(b, 'ALTERID')) || 0,
+      tally_alterid: intOf(tag(b, 'ALTERID')) || 0,
     });
   }
 
@@ -123,7 +139,7 @@ function parseExport(xml) {
       opening_balance: num(tag(b, 'OPENINGBALANCE')) ?? 0,
       gstin: tag(b, 'GSTIN') || null,
       tally_guid: tag(b, 'GUID') || null,
-      tally_alterid: num(tag(b, 'ALTERID')) || 0,
+      tally_alterid: intOf(tag(b, 'ALTERID')) || 0,
     });
   }
 
@@ -143,7 +159,7 @@ function parseExport(xml) {
       party_name: party,
       entries,
       tally_guid: tag(clean, 'GUID') || null,
-      tally_alterid: num(tag(clean, 'ALTERID')) || 0,
+      tally_alterid: intOf(tag(clean, 'ALTERID')) || 0,
       cancelled: /^yes$/i.test(tag(clean, 'ISCANCELLED') || ''),
     });
   }

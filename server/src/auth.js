@@ -91,7 +91,9 @@ async function audit(companyId, user, action, entity, entityId, details) {
     id: uid('aud'), company_id: companyId,
     user_id: user ? user.id : null, user_name: user ? user.name : 'system',
     action, entity, entity_id: entityId,
-    details: details ? JSON.stringify(details) : null, at: nowIso(),
+    // BigInt-safe: any stray paise BigInt in details is serialized as a string
+    // so an audit log can never crash a route.
+    details: details ? JSON.stringify(details, (k, v) => (typeof v === 'bigint' ? v.toString() : v)) : null, at: nowIso(),
   });
 }
 

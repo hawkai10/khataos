@@ -199,12 +199,12 @@ function CaptureDialog({ onDone }) {
         invoice_no: form.invoice_no,
         invoice_date: form.invoice_date,
         due_date: form.due_date || null,
-        taxable_amount: Number(form.taxable_amount) || 0,
-        cgst: Number(form.cgst) || 0,
-        sgst: Number(form.sgst) || 0,
-        igst: Number(form.igst) || 0,
-        gross_amount: Number(form.gross_amount) || 0,
-        tds_amount: Number(form.tds_amount) || 0,
+        taxable_amount: form.taxable_amount ? String(form.taxable_amount) : '0',
+        cgst: form.cgst ? String(form.cgst) : '0',
+        sgst: form.sgst ? String(form.sgst) : '0',
+        igst: form.igst ? String(form.igst) : '0',
+        gross_amount: form.gross_amount ? String(form.gross_amount) : '0',
+        tds_amount: form.tds_amount ? String(form.tds_amount) : '0',
         gstin_vendor: form.gstin_vendor || null,
       });
       toast.success('Invoice captured and routed for approval');

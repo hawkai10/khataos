@@ -18,7 +18,8 @@
 // ============================================================================
 
 const { db, insert, get, all, run } = require('./db');
-const { uid, nowIso, todayStr, daysAgo, inr } = require('./util');
+const { uid, nowIso, todayStr, daysAgo } = require('./util');
+const { Money } = require('./money');
 const { env, hasAll } = require('./config');
 
 // Read at call time so credentials can be set/changed after require.
@@ -199,7 +200,7 @@ async function fetchBalance(accountNumber) {
   return {
     decentroTxnId: json && json.decentroTxnId,
     accountNumber: d.accountNumber || accountNumber,
-    presentBalance: d.presentBalance != null ? inr(Number(d.presentBalance)) : null,
+    presentBalance: d.presentBalance != null ? Number(Money.fromRupees(d.presentBalance).toPaise()) : null,
   };
 }
 
@@ -224,16 +225,16 @@ function inferMode(description) {
 // Pure mapper: Decentro statement response -> our bank_transactions shape.
 function mapStatement(data) {
   const rows = (data && data.statement ? data.statement : []).map((t, idx) => {
-    const deposit = Number(t.depositAmount || 0);
-    const withdrawal = Number(t.withdrawalAmount || 0);
-    const amount = inr(deposit - withdrawal);
+    const deposit = Money.fromRupees(t.depositAmount || 0);
+    const withdrawal = Money.fromRupees(t.withdrawalAmount || 0);
+    const amount = Number(deposit.minus(withdrawal).toPaise());
     const ts = String(t.timestamp || '');
     return {
       external_id: String(t.bankTransactionId || `${data.accountNumber}-${ts || idx}`),
       txn_date: ts.slice(0, 10),
       value_date: ts.slice(0, 10),
       amount,
-      balance_after: t.balance != null ? inr(Number(t.balance)) : null,
+      balance_after: t.balance != null ? Number(Money.fromRupees(t.balance).toPaise()) : null,
       description: String(t.description || ''),
       mode: inferMode(t.description),
       ref_no: t.bankTransactionId ? String(t.bankTransactionId) : null,
@@ -245,8 +246,8 @@ function mapStatement(data) {
     accountNumber: data && data.accountNumber,
     name: data && data.name,
     ifsc: data && data.ifsc,
-    openingBalance: data && data.openingBalance != null ? inr(Number(data.openingBalance)) : null,
-    closingBalance: data && data.closingBalance != null ? inr(Number(data.closingBalance)) : null,
+    openingBalance: data && data.openingBalance != null ? Number(Money.fromRupees(data.openingBalance).toPaise()) : null,
+    closingBalance: data && data.closingBalance != null ? Number(Money.fromRupees(data.closingBalance).toPaise()) : null,
     rows,
   };
 }

@@ -183,10 +183,10 @@ App.VIEWS.cash = {
       API.get('/api/cash/transactions?days=7'), API.get('/api/cash/trend?days=30'),
       API.get('/api/integrations/decentro/status'),
     ]);
-    const total = accounts.reduce((s, a) => s + (a.balance || 0), 0);
-    const unc = accounts.reduce((s, a) => s + (a.uncleared || 0), 0);
-    const inflow = txns.filter(t => t.amount > 0).reduce((s, t) => s + t.amount, 0);
-    const outflow = Math.abs(txns.filter(t => t.amount < 0).reduce((s, t) => s + t.amount, 0));
+    const total = UI.sumRupees(accounts.map(a => a.balance));
+    const unc = UI.sumRupees(accounts.map(a => a.uncleared));
+    const inflow = UI.sumRupees(txns.filter(t => UI.signRupees(t.amount) > 0).map(t => t.amount));
+    const outflow = -UI.sumRupees(txns.filter(t => UI.signRupees(t.amount) < 0).map(t => t.amount));
     const syncMins = overview.last_synced_at ? Math.floor((Date.now() - new Date(overview.last_synced_at).getTime()) / 60000) : null;
     el.innerHTML = `
       ${syncMins != null && syncMins > 15 ? `
@@ -196,10 +196,10 @@ App.VIEWS.cash = {
           <button class="btn small" id="stale-refresh">⟳ Refresh now</button>
         </div>` : ''}
       <div class="grid kpis">
-        ${UI.kpiCard({ icon: 'bank', label: 'Total available cash', value: UI.inrCompact(total), sub: `${UI.inr(total)} across ${accounts.length} accounts`, title: `Available cash: ${UI.inr(total)}` })}
-        ${UI.kpiCard({ icon: 'refresh', label: 'Uncleared funds', value: UI.inrCompact(unc), sub: 'cheques / deposits in clearing' })}
-        ${UI.kpiCard({ icon: 'bar', label: '7-day inflows', value: UI.inrCompact(inflow), sub: 'credits received' })}
-        ${UI.kpiCard({ icon: 'bar', label: '7-day outflows', value: UI.inrCompact(outflow), sub: 'debits paid' })}
+        ${UI.kpiCard({ icon: 'bank', label: 'Total available cash', value: UI.inrCompact(UI.rupees(total)), sub: `${UI.inr(UI.rupees(total))} across ${accounts.length} accounts`, title: `Available cash: ${UI.inr(UI.rupees(total))}` })}
+        ${UI.kpiCard({ icon: 'refresh', label: 'Uncleared funds', value: UI.inrCompact(UI.rupees(unc)), sub: 'cheques / deposits in clearing' })}
+        ${UI.kpiCard({ icon: 'bar', label: '7-day inflows', value: UI.inrCompact(UI.rupees(inflow)), sub: 'credits received' })}
+        ${UI.kpiCard({ icon: 'bar', label: '7-day outflows', value: UI.inrCompact(UI.rupees(outflow)), sub: 'debits paid' })}
       </div>
       <div class="grid cols-2">
         <div class="card">
@@ -235,7 +235,7 @@ App.VIEWS.cash = {
                 <td class="muted small">${UI.esc(t.account_name)}</td>
                 <td class="cell-ellipsis" title="${UI.esc(t.description)}">${UI.esc(t.description)}</td>
                 <td>${UI.modePill(t.mode)}</td>
-                <td class="num" style="color:${t.amount >= 0 ? 'var(--ok)' : 'var(--ink)'}">${t.amount >= 0 ? '+' : '−'}${UI.inrFull(Math.abs(t.amount))}</td>
+                <td class="num" style="color:${UI.signRupees(t.amount) >= 0 ? 'var(--ok)' : 'var(--ink)'}">${UI.signRupees(t.amount) >= 0 ? '+' : '−'}${UI.inrFull(UI.rupees(UI.paiseOf(t.amount) < 0n ? -UI.paiseOf(t.amount) : UI.paiseOf(t.amount)))}</td>
                 <td class="num muted">${UI.inr(t.balance_after)}</td>
                 <td>${t.status === 'uncleared' ? '<span class="pill warn">uncleared</span>' : '<span class="pill ok">posted</span>'}</td>
               </tr>`).join('')}
@@ -741,8 +741,8 @@ async function paymentModal() {
   document.getElementById('p-vendor').innerHTML = vendors.map(v => `<option value="${v.id}">${UI.esc(v.name)} (${UI.esc(v.tds_section || 'no TDS')} ${v.tds_rate * 100}%)</option>`).join('');
   document.getElementById('p-invoices').addEventListener('change', () => {
     const sel = Array.from(document.getElementById('p-invoices').selectedOptions).map(o => o.value);
-    const sum = sel.reduce((s, id) => s + (payable.find(i => i.id === id)?.net_payable || 0), 0);
-    document.getElementById('p-summary').textContent = sel.length ? `${sel.length} invoice(s) · net ₹${sum.toLocaleString('en-IN')} (TDS already deducted)` : '';
+    const sum = UI.sumRupees(sel.map(id => (payable.find(i => i.id === id) || {}).net_payable));
+    document.getElementById('p-summary').textContent = sel.length ? `${sel.length} invoice(s) · net ₹${UI.inrFull(UI.rupees(sum))} (TDS already deducted)` : '';
   });
   document.getElementById('p-save').onclick = async () => {
     const vendorId = document.getElementById('p-vendor').value;

@@ -4,20 +4,22 @@
 // query shared by the single-create and batch payment routes.
 
 const { all, get, insert, run } = require('../db');
-const { uid, nowIso, todayStr, inr } = require('../util');
+const { uid, nowIso, todayStr } = require('../util');
+const { Money } = require('../money');
 const { getSettings } = require('./company');
+const { publicize } = require('../api/helpers');
 
 const PAYMENT_MODES = ['UPI', 'IMPS', 'NEFT', 'RTGS'];
 
 function computeAmounts(invoices) {
-  const amount = inr(invoices.reduce((s, i) => s + i.gross_amount, 0));
-  const tds = inr(invoices.reduce((s, i) => s + (i.tds_amount || 0), 0));
-  return { amount, tds, net: inr(amount - tds) };
+  const amount = Money.sum(invoices.map((i) => Money.fromPaise(i.gross_amount || 0)));
+  const tds = Money.sum(invoices.map((i) => Money.fromPaise(i.tds_amount || 0)));
+  return { amount, tds, net: amount.minus(tds) };
 }
 
 async function approvalThreshold(coId) {
   const settings = await getSettings(coId);
-  return settings.payment_approval_threshold || 500000;
+  return Money.fromRupees(settings.payment_approval_threshold || 500000);
 }
 
 // Inserts a payment row and returns the new row (fetched fresh so gateway
@@ -28,12 +30,12 @@ async function insertPayment(coId, opts) {
   await insert('payments', {
     id: payId, company_id: coId, vendor_id: vendor.id,
     invoice_ids: JSON.stringify(invoices.map((i) => i.id)),
-    amount, mode, type, status,
+    amount: Number(amount.toPaise()), mode, type, status,
     scheduled_date: scheduledDate || null,
     bank_account_id: accountId || null,
     reference: `${mode}-${String(Math.floor(Math.random() * 90000000) + 10000000)}`,
     gateway: 'razorpayx', gst_ledger: vendor.ledger_name, tds_section: vendor.tds_section,
-    tds_amount: tds, net_amount: net,
+    tds_amount: Number(tds.toPaise()), net_amount: Number(net.toPaise()),
     initiated_by: user.id, initiated_at: nowIso(), created_at: nowIso(),
   });
   return get('SELECT * FROM payments WHERE id = ?', [payId]);
@@ -59,7 +61,7 @@ async function listPayments(coId, status) {
   if (ids.length) {
     refMap = Object.fromEntries((await all(`SELECT id, invoice_no FROM invoices WHERE id IN (${ids.map(() => '?').join(',')})`, ids)).map((i) => [i.id, i.invoice_no]));
   }
-  return rows.map((r) => ({ ...r, invoice_refs: (() => { try { return JSON.parse(r.invoice_ids || '[]').map((id) => refMap[id]).filter(Boolean).join(', '); } catch { return null; } })() }));
+  return rows.map((r) => publicize({ ...r, invoice_refs: (() => { try { return JSON.parse(r.invoice_ids || '[]').map((id) => refMap[id]).filter(Boolean).join(', '); } catch { return null; } })() }, 'payments'));
 }
 
 module.exports = { PAYMENT_MODES, computeAmounts, approvalThreshold, insertPayment, markInvoicesScheduled, listPayments };

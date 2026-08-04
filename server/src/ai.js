@@ -16,7 +16,9 @@
 // ============================================================================
 
 const { all, get } = require('./db');
-const { todayStr, daysAgo, inr, formatINR, minsSince } = require('./util');
+const { todayStr, daysAgo, formatINR, round2, minsSince } = require('./util');
+const { Money } = require('./money');
+const { rupees } = require('./api/helpers');
 const recon = require('./recon');
 const { TallyConnector } = require('./adapters');
 const Cash = require('./services/cash');
@@ -82,20 +84,26 @@ async function reconPosition(coId) {
 
 async function spendBreakdown(coId) {
   const txns = await all(`SELECT amount, mode, description FROM bank_transactions WHERE company_id = ? AND amount < 0 AND txn_date >= ?`, [coId, daysAgo(29)]);
-  const buckets = { 'Vendor payments': 0, 'Statutory (GST/TDS)': 0, 'Salaries': 0, 'Operating expenses': 0, 'Bank charges': 0, 'Other': 0 };
+  const zero = () => Money.fromPaise(0);
+  const buckets = { 'Vendor payments': zero(), 'Statutory (GST/TDS)': zero(), 'Salaries': zero(), 'Operating expenses': zero(), 'Bank charges': zero(), 'Other': zero() };
   for (const t of txns) {
     const d = String(t.description || '').toUpperCase();
-    const a = Math.abs(t.amount);
-    if (d.includes('GST-DEPOSIT') || d.includes('TDS-') || d.includes('GST DEPOSIT')) buckets['Statutory (GST/TDS)'] += a;
-    else if (d.includes('SALARY')) buckets['Salaries'] += a;
-    else if (d.includes('BANK CHARGES') || d.includes('NEFT CHARGES') || d.includes('CHARGES')) buckets['Bank charges'] += a;
-    else if (d.includes('OUTWARD') || d.includes('PAYMENT') || ['NEFT', 'IMPS', 'RTGS'].includes(t.mode)) buckets['Vendor payments'] += a;
-    else if (d.includes('RENT') || d.includes('ELECTRICITY') || d.includes('FUEL') || d.includes('COURIER') || d.includes('SUPPLIES') || d.includes('INTERNET')) buckets['Operating expenses'] += a;
-    else buckets['Other'] += a;
+    const a = Money.fromPaise(Math.abs(Number(t.amount) || 0));
+    if (d.includes('GST-DEPOSIT') || d.includes('TDS-') || d.includes('GST DEPOSIT')) buckets['Statutory (GST/TDS)'] = buckets['Statutory (GST/TDS)'].plus(a);
+    else if (d.includes('SALARY')) buckets['Salaries'] = buckets['Salaries'].plus(a);
+    else if (d.includes('BANK CHARGES') || d.includes('NEFT CHARGES') || d.includes('CHARGES')) buckets['Bank charges'] = buckets['Bank charges'].plus(a);
+    else if (d.includes('OUTWARD') || d.includes('PAYMENT') || ['NEFT', 'IMPS', 'RTGS'].includes(t.mode)) buckets['Vendor payments'] = buckets['Vendor payments'].plus(a);
+    else if (d.includes('RENT') || d.includes('ELECTRICITY') || d.includes('FUEL') || d.includes('COURIER') || d.includes('SUPPLIES') || d.includes('INTERNET')) buckets['Operating expenses'] = buckets['Operating expenses'].plus(a);
+    else buckets['Other'] = buckets['Other'].plus(a);
   }
-  const total = Object.values(buckets).reduce((s, v) => s + v, 0);
-  const rows = Object.entries(buckets).map(([category, amount]) => ({ category, amount: inr(amount), share: total ? inr((amount / total) * 100) : 0 })).sort((a, b) => b.amount - a.amount);
-  return { rows, total: inr(total) };
+  const total = Money.sum(Object.values(buckets));
+  const rows = Object.entries(buckets)
+    .map(([category, amount]) => ({
+      category, amount: rupees(amount),
+      share: total.isZero() ? 0 : round2((Number(amount.toPaise()) / Number(total.toPaise())) * 100),
+    }))
+    .sort((a, b) => Number(Money.fromRupees(b.amount).toPaise()) - Number(Money.fromRupees(a.amount).toPaise()));
+  return { rows, total: rupees(total) };
 }
 
 async function pendingApprovals(coId, role) {
@@ -116,17 +124,17 @@ async function compactContext(coId, role) {
   const topVendors = await all(`SELECT v.name, SUM(i.net_payable) amt FROM vendors v JOIN invoices i ON i.vendor_id = v.id
     WHERE v.company_id = ? AND i.status IN ('approved','scheduled','pending_approval') GROUP BY v.id ORDER BY amt DESC LIMIT 5`, [coId]);
   return {
-    cash: { available: cash.available, uncleared: cash.uncleared, accounts: cash.accounts, synced_min: minsSince(cash.last_synced_at) },
-    runway: { months: rw.runway_months, burn: rw.monthly_burn },
+    cash: { available: rupees(cash.available), uncleared: rupees(cash.uncleared), accounts: cash.accounts, synced_min: minsSince(cash.last_synced_at) },
+    runway: { months: rw.runway_months, burn: rupees(rw.monthly_burn) },
     due: due.rows.slice(0, 6).map((i) => ({ no: i.invoice_no, vendor: i.vendor_name, net: i.net_payable, due: i.due_date })),
     overdue: due.overdue.slice(0, 6).map((i) => ({ no: i.invoice_no, vendor: i.vendor_name, net: i.net_payable, due: i.due_date })),
     approvals_pending: pending.slice(0, 6).map((a) => ({ no: a.invoice_no, amt: a.gross_amount, role: a.required_role })),
-    gst: { itc: g.itc, liability: g.liability, period: g.period, open_mismatches: g.mismatches.length, mismatches: g.mismatches.slice(0, 5).map((m) => ({ inv: m.invoice_no, variance: m.variance })) },
+    gst: { itc: rupees(g.itc), liability: rupees(g.liability), period: g.period, open_mismatches: g.mismatches.length, mismatches: g.mismatches.slice(0, 5).map((m) => ({ inv: m.invoice_no, variance: rupees(m.variance) })) },
     recon: { accuracy: r.accuracy, matched: r.auto_matched, total: r.total, target: r.target, unmatched_30d: r.unmatched.length },
     tally: { status: tally.status, synced_min: minsSince(tally.last_sync_at), uptime_30d: tally.uptime_30d },
     spend_30d: spend.rows.slice(0, 4).map((x) => ({ cat: x.category, amt: x.amount })),
-    failed_payments: failed.map((p) => ({ ref: p.reference, amt: p.amount })),
-    top_vendors: topVendors.map((v) => ({ name: v.name, amt: v.amt })),
+    failed_payments: failed.map((p) => ({ ref: p.reference, amt: rupees(p.amount) })),
+    top_vendors: topVendors.map((v) => ({ name: v.name, amt: rupees(v.amt) })),
   };
 }
 
@@ -275,7 +283,7 @@ async function answerFor(intent, coId, user) {
       const rows = await pendingApprovals(coId, user.role);
       return {
         intent, data: { rows, role: user.role },
-        answer: rows.length ? `${rows.length} invoice${rows.length === 1 ? '' : 's'} are waiting for your (${user.role.replace('_', ' ')}) approval, worth ${fmt(rows.reduce((s, r) => s + r.gross_amount, 0))}.` : 'You have no invoices waiting on your approval right now.',
+        answer: rows.length ? `${rows.length} invoice${rows.length === 1 ? '' : 's'} are waiting for your (${user.role.replace('_', ' ')}) approval, worth ${fmt(Money.sum(rows.map((r) => Money.fromRupees(r.gross_amount))))}.` : 'You have no invoices waiting on your approval right now.',
       };
     }
     case 'failed': {
@@ -299,7 +307,7 @@ async function answerFor(intent, coId, user) {
       const s = await spendBreakdown(coId);
       return {
         intent, data: s,
-        answer: `Over the last 30 days you spent ${fmt(s.total)}, led by ${s.rows[0] ? `${s.rows[0].category} (${fmt(s.rows[0].amount)}, ${s.rows[0].share}%)` : '—'}.`,
+        answer: `Over the last 30 days you spent ${fmt(Money.fromRupees(s.total))}, led by ${s.rows[0] ? `${s.rows[0].category} (${fmt(Money.fromRupees(s.rows[0].amount))}, ${s.rows[0].share}%)` : '—'}.`,
       };
     }
     case 'suggestions': {

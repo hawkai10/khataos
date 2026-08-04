@@ -22,6 +22,9 @@ const legacy = new DatabaseSync(TEST_DB);
 legacy.exec('CREATE TABLE invoices (id TEXT PRIMARY KEY, company_id TEXT, invoice_no TEXT, created_at TEXT)');
 legacy.exec('CREATE TABLE invoice_lines (id TEXT PRIMARY KEY, invoice_id TEXT)');
 legacy.exec('CREATE TABLE approvals (id TEXT PRIMARY KEY, invoice_id TEXT)');
+// Legacy money: REAL rupees column, as every pre-paise database stored it.
+legacy.exec('CREATE TABLE bank_transactions (id TEXT PRIMARY KEY, amount REAL)');
+legacy.exec("INSERT INTO bank_transactions VALUES ('btx-legacy', -25000.50)");
 legacy.exec("INSERT INTO invoices VALUES ('inv-old', 'co1', 'INV-1', '2026-01-01T00:00:00.000Z')");
 legacy.exec("INSERT INTO invoices VALUES ('inv-new', 'co1', 'INV-1', '2026-01-02T00:00:00.000Z')");
 legacy.exec("INSERT INTO invoice_lines VALUES ('line-dupe', 'inv-new')");
@@ -61,9 +64,14 @@ async function check(name, fn) {
     assert.strictEqual((await all('SELECT id FROM approvals WHERE invoice_id = ?', ['inv-new'])).length, 0);
   });
 
-  await check('migration: schema_migrations records versions 1 and 2 exactly once', async () => {
+  await check('migration: schema_migrations records versions 1, 2 and 3 exactly once', async () => {
     const rows = await all('SELECT version FROM schema_migrations ORDER BY version');
-    assert.deepStrictEqual(rows.map((r) => r.version), [1, 2]);
+    assert.deepStrictEqual(rows.map((r) => r.version), [1, 2, 3]);
+  });
+
+  await check('migration: legacy rupee money columns are converted to paise (v3)', async () => {
+    const row = await get('SELECT amount FROM bank_transactions WHERE id = ?', ['btx-legacy']);
+    assert.strictEqual(row.amount, -2500050, 'rupees -25000.50 must become -2500050 paise');
   });
 
   await check('migration: the unique index now rejects duplicate invoice numbers', async () => {

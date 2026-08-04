@@ -111,8 +111,8 @@ CREATE TABLE IF NOT EXISTS bank_transactions (
   external_id TEXT,
   txn_date TEXT NOT NULL,
   value_date TEXT,
-  amount REAL NOT NULL,
-  balance_after REAL,
+  amount BIGINT NOT NULL,
+  balance_after BIGINT,
   description TEXT,
   mode TEXT,
   ref_no TEXT,
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS cash_daily (
   company_id TEXT NOT NULL,
   account_id TEXT NOT NULL,
   date TEXT NOT NULL,
-  closing_balance REAL NOT NULL,
+  closing_balance BIGINT NOT NULL,
   source TEXT DEFAULT 'aa',
   UNIQUE(account_id, date)
 );
@@ -161,14 +161,14 @@ CREATE TABLE IF NOT EXISTS invoices (
   due_date TEXT,
   source TEXT NOT NULL,
   status TEXT NOT NULL,
-  gross_amount REAL NOT NULL DEFAULT 0,
-  taxable_amount REAL NOT NULL DEFAULT 0,
-  cgst REAL DEFAULT 0,
-  sgst REAL DEFAULT 0,
-  igst REAL DEFAULT 0,
-  cess REAL DEFAULT 0,
-  tds_amount REAL DEFAULT 0,
-  net_payable REAL DEFAULT 0,
+  gross_amount BIGINT NOT NULL DEFAULT 0,
+  taxable_amount BIGINT NOT NULL DEFAULT 0,
+  cgst BIGINT DEFAULT 0,
+  sgst BIGINT DEFAULT 0,
+  igst BIGINT DEFAULT 0,
+  cess BIGINT DEFAULT 0,
+  tds_amount BIGINT DEFAULT 0,
+  net_payable BIGINT DEFAULT 0,
   gstin_vendor TEXT,
   hsns TEXT DEFAULT '[]',
   purchase_order_no TEXT,
@@ -190,12 +190,12 @@ CREATE TABLE IF NOT EXISTS invoice_lines (
   hsn TEXT,
   description TEXT,
   qty REAL DEFAULT 1,
-  rate REAL DEFAULT 0,
-  taxable REAL DEFAULT 0,
-  cgst REAL DEFAULT 0,
-  sgst REAL DEFAULT 0,
-  igst REAL DEFAULT 0,
-  cess REAL DEFAULT 0
+  rate BIGINT DEFAULT 0,
+  taxable BIGINT DEFAULT 0,
+  cgst BIGINT DEFAULT 0,
+  sgst BIGINT DEFAULT 0,
+  igst BIGINT DEFAULT 0,
+  cess BIGINT DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS approvals (
@@ -217,7 +217,7 @@ CREATE TABLE IF NOT EXISTS payments (
   company_id TEXT NOT NULL REFERENCES companies(id),
   vendor_id TEXT REFERENCES vendors(id),
   invoice_ids TEXT DEFAULT '[]',
-  amount REAL NOT NULL,
+  amount BIGINT NOT NULL,
   mode TEXT NOT NULL,
   type TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -228,8 +228,8 @@ CREATE TABLE IF NOT EXISTS payments (
   gateway_txn_id TEXT,
   gst_ledger TEXT,
   tds_section TEXT,
-  tds_amount REAL DEFAULT 0,
-  net_amount REAL NOT NULL,
+  tds_amount BIGINT DEFAULT 0,
+  net_amount BIGINT NOT NULL,
   initiated_by TEXT,
   approved_by TEXT,
   failure_reason TEXT,
@@ -257,10 +257,10 @@ CREATE TABLE IF NOT EXISTS gstr2b_snapshots (
   company_id TEXT NOT NULL,
   period TEXT NOT NULL,
   gstin TEXT,
-  total_itc REAL DEFAULT 0,
-  itc_cgst REAL DEFAULT 0,
-  itc_sgst REAL DEFAULT 0,
-  itc_igst REAL DEFAULT 0,
+  total_itc BIGINT DEFAULT 0,
+  itc_cgst BIGINT DEFAULT 0,
+  itc_sgst BIGINT DEFAULT 0,
+  itc_igst BIGINT DEFAULT 0,
   data_json TEXT DEFAULT '[]',
   cdnr_json TEXT DEFAULT '[]',
   source TEXT DEFAULT 'gstr2b',
@@ -274,9 +274,9 @@ CREATE TABLE IF NOT EXISTS gst_mismatches (
   invoice_no TEXT,
   vendor_gstin TEXT,
   vendor_name TEXT,
-  platform_amount REAL DEFAULT 0,
-  gstr2b_amount REAL DEFAULT 0,
-  variance REAL DEFAULT 0,
+  platform_amount BIGINT DEFAULT 0,
+  gstr2b_amount BIGINT DEFAULT 0,
+  variance BIGINT DEFAULT 0,
   status TEXT DEFAULT 'open',
   note TEXT
 );
@@ -377,7 +377,7 @@ CREATE TABLE IF NOT EXISTS tally_ledgers (
   company_id TEXT NOT NULL,
   name TEXT NOT NULL,
   group_name TEXT,
-  opening_balance REAL DEFAULT 0,
+  opening_balance BIGINT DEFAULT 0,
   gstin TEXT,
   tally_guid TEXT,
   tally_alterid INTEGER DEFAULT 0,
@@ -390,7 +390,7 @@ CREATE TABLE IF NOT EXISTS tally_vouchers (
   voucher_number TEXT,
   voucher_type TEXT,
   date TEXT,
-  amount REAL DEFAULT 0,
+  amount BIGINT DEFAULT 0,
   party_name TEXT,
   entry_json TEXT DEFAULT '[]',
   tally_guid TEXT,
@@ -487,6 +487,77 @@ const SCHEMA_MIGRATIONS = [
       'CREATE INDEX IF NOT EXISTS idx_vendors_company_active ON vendors(company_id, active)',
     ],
   },
+  {
+    // v3: legacy rupee (REAL/DOUBLE PRECISION) -> paise (BIGINT) data
+    // migration. Runs once; only touches columns that still have the old
+    // float type, so databases created with the paise schema are skipped.
+    // Fresh databases get paise columns from the schema itself and never
+    // store rupee floats.
+    version: 3,
+    fn(exec, query) {
+      // SQLite: fully synchronous (PRAGMA + UPDATE).
+      if (DB_ENGINE === 'sqlite') {
+        for (const [table, column] of MONEY_COLUMNS) {
+          let type = null;
+          try {
+            const rows = query(`PRAGMA table_info(${table})`);
+            const row = (rows || []).find((r) => r.name === column);
+            type = row ? String(row.type || '').toLowerCase() : null;
+          } catch { /* table may not exist */ }
+          if (type !== 'real') continue;
+          try { exec(`UPDATE ${table} SET ${column} = ROUND(${column} * 100)`); } catch { /* best effort */ }
+        }
+        return;
+      }
+      // PostgreSQL / pglite: information_schema + UPDATE (async).
+      return (async () => {
+        for (const [table, column] of MONEY_COLUMNS) {
+          let type = null;
+          try {
+            const rows = await query(`SELECT data_type AS type FROM information_schema.columns WHERE table_name = '${table}' AND column_name = '${column}'`);
+            type = (rows && rows[0] && String(rows[0].type || '').toLowerCase()) || null;
+          } catch { /* table may not exist */ }
+          if (type !== 'double precision' && type !== 'real') continue;
+          try { await exec(`UPDATE ${table} SET ${column} = ROUND(ROUND(${column}::numeric, 2) * 100)`); } catch { /* best effort */ }
+        }
+      })();
+    },
+  },
+];
+
+// Every column that stores money, stored as integer paise (BIGINT). Used by
+// the v3 legacy migration to detect float-typed columns that still hold
+// rupees. Keep in sync with the money columns in SCHEMA and src/db/schema.js.
+const MONEY_COLUMNS = [
+  ['bank_transactions', 'amount'],
+  ['bank_transactions', 'balance_after'],
+  ['cash_daily', 'closing_balance'],
+  ['invoices', 'gross_amount'],
+  ['invoices', 'taxable_amount'],
+  ['invoices', 'cgst'],
+  ['invoices', 'sgst'],
+  ['invoices', 'igst'],
+  ['invoices', 'cess'],
+  ['invoices', 'tds_amount'],
+  ['invoices', 'net_payable'],
+  ['invoice_lines', 'rate'],
+  ['invoice_lines', 'taxable'],
+  ['invoice_lines', 'cgst'],
+  ['invoice_lines', 'sgst'],
+  ['invoice_lines', 'igst'],
+  ['invoice_lines', 'cess'],
+  ['payments', 'amount'],
+  ['payments', 'tds_amount'],
+  ['payments', 'net_amount'],
+  ['gstr2b_snapshots', 'total_itc'],
+  ['gstr2b_snapshots', 'itc_cgst'],
+  ['gstr2b_snapshots', 'itc_sgst'],
+  ['gstr2b_snapshots', 'itc_igst'],
+  ['gst_mismatches', 'platform_amount'],
+  ['gst_mismatches', 'gstr2b_amount'],
+  ['gst_mismatches', 'variance'],
+  ['tally_ledgers', 'opening_balance'],
+  ['tally_vouchers', 'amount'],
 ];
 
 function runVersionedMigrations(exec, query) {
@@ -496,8 +567,12 @@ function runVersionedMigrations(exec, query) {
     if (applied.has(m.version)) continue;
     exec('BEGIN');
     try {
-      for (const sql of m.sql) {
-        try { exec(sql); } catch (err) { if (!m.bestEffort) throw err; }
+      if (m.fn) {
+        m.fn(exec, query);
+      } else {
+        for (const sql of m.sql) {
+          try { exec(sql); } catch (err) { if (!m.bestEffort) throw err; }
+        }
       }
       exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (${m.version}, '${new Date().toISOString()}')`);
       exec('COMMIT');
@@ -516,8 +591,12 @@ async function runVersionedMigrationsAsync(exec, query) {
     if (applied.has(m.version)) continue;
     await exec('BEGIN');
     try {
-      for (const sql of m.sql) {
-        try { await exec(sql); } catch (err) { if (!m.bestEffort) throw err; }
+      if (m.fn) {
+        await m.fn(exec, query);
+      } else {
+        for (const sql of m.sql) {
+          try { await exec(sql); } catch (err) { if (!m.bestEffort) throw err; }
+        }
       }
       await exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (${m.version}, '${new Date().toISOString()}')`);
       await exec('COMMIT');
@@ -528,9 +607,10 @@ async function runVersionedMigrationsAsync(exec, query) {
   }
 }
 
-// PostgreSQL flavour: amounts as double precision so they return as JS numbers
-// (identical to SQLite REAL semantics); flags stay INTEGER so `= 1` checks
-// keep working; dates/timestamps stay TEXT for identical formatting.
+// PostgreSQL flavour: money columns are BIGINT (integer paise, exact);
+// non-money rates/quantities stay DOUBLE PRECISION. Flags stay INTEGER so
+// `= 1` checks keep working; dates/timestamps stay TEXT for identical
+// formatting across engines.
 const PG_SCHEMA = SCHEMA.replace(/\bREAL\b/g, 'DOUBLE PRECISION');
 
 // translate ? placeholders to $1..$n for PostgreSQL

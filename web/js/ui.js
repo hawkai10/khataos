@@ -18,6 +18,33 @@ const UI = {
 
   inrFull(n) { return this.inr(n, 2); },
 
+  // Exact paise helpers: the API delivers amounts as rupee decimal strings.
+  // All summing goes through BigInt paise, never Number arithmetic.
+  paiseOf(value) {
+    const s = String(value == null ? '' : value).trim();
+    if (!s) return 0n;
+    const m = /^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(s);
+    if (!m) return 0n;
+    const paise = BigInt(m[2]) * 100n + BigInt((m[3] || '').padEnd(2, '0'));
+    return m[1] === '-' ? -paise : paise;
+  },
+
+  rupees(paise) {
+    const p = BigInt(paise);
+    const neg = p < 0n;
+    const a = neg ? -p : p;
+    return (neg ? '-' : '') + (a / 100n).toString() + '.' + String(a % 100n).padStart(2, '0');
+  },
+
+  sumRupees(values) {
+    return values.reduce((t, v) => t + this.paiseOf(v), 0n);
+  },
+
+  signRupees(value) {
+    const p = this.paiseOf(value);
+    return p > 0n ? 1 : p < 0n ? -1 : 0;
+  },
+
   // Compact Indian units for KPI cards: ₹22.04 Cr / ₹1.2 L — keeps big
   // numbers from overflowing their boxes; full values live in the sub-line.
   inrCompact(n) {

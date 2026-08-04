@@ -58,7 +58,7 @@ check('new parser: entries from nested, flat and inventory shapes are preserved 
   const sl = d.vouchers.find((v) => v.voucher_number === 'SL/24-25/001');
   // order: flat CGST/SGST/party entries first, then inventory allocation
   assert.deepStrictEqual(sl.entries.map((e) => e.ledger), ['Output CGST', 'Output SGST', 'Sharma Enterprises', 'Sales Account']);
-  assert.strictEqual(sl.amount, -116125); // party entry wins over allocation amounts
+  assert.strictEqual(sl.amount, -11612500); // party entry wins over allocation amounts
   const off = Tally.parseExport(OFFICIAL_SAMPLE);
   assert.deepStrictEqual(off.vouchers[0].entries.map((e) => e.ledger), ['Customer ABC', 'Bank']); // wrapped list unwrapped once
 });

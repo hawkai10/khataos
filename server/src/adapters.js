@@ -15,6 +15,8 @@ const Gstn = require('./gstn');
 const Tally = require('./tally');
 const TallyMapping = require('./tally-mapping');
 const { env, hasAll } = require('./config');
+const { Money } = require('./money');
+const { rupees } = require('./api/helpers');
 
 function hashCode(str) {
   let h = 0;
@@ -187,7 +189,7 @@ const TallyConnector = {
     const now = nowIso();
     if (h) {
       await run(`UPDATE tally_health SET last_sync_at = ?, last_success_at = ?, status = 'connected', uptime_30d = ? WHERE company_id = ?`,
-        [now, now, Math.min(100, inr(uptime + 0.001)), companyId]);
+        [now, now, Math.min(100, Math.round((uptime + 0.001) * 100) / 100), companyId]);
     } else {
       await insert('tally_health', { company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 100 });
     }
@@ -250,6 +252,7 @@ const OcrEngine = {
   extract(text, meta = {}) {
     const t = String(text || '');
     const num = (re) => { const m = t.match(re); return m ? m[1].replace(/[₹,\s]/g, '') : null; };
+    const paise = (s) => (s != null ? Number(Money.fromRupees(s).toPaise()) : null);
     const gstin = (t.match(/GSTIN\s*[:\-\s]*([0-9A-Z]{15})/i) || t.match(/\b(\d{2}[A-Z]{5}\d{4}[A-Z]{1}\d[Z][0-9A-Z]{3})\b/i) || [])[1];
     const invoiceNo = (t.match(/Invoice\s*(?:No|Number|#)\s*[:\-\s]*([A-Za-z0-9\-/]+)/i) || [])[1];
     const invoiceDate = (t.match(/Invoice\s*Date\s*[:\-\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/i) || t.match(/(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/))[1];
@@ -266,7 +269,7 @@ const OcrEngine = {
     const hsnRe = /(\d{4,8})\s+([A-Za-z0-9&%.,\s\-/]+?)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)/g;
     let m;
     while ((m = hsnRe.exec(t)) && hsns.length < 8) {
-      hsns.push({ hsn: m[1], description: m[2].trim().slice(0, 60), qty: 1, rate: parseFloat(m[3].replace(/,/g, '')), taxable: parseFloat(m[4].replace(/,/g, '')), cgst: parseFloat(m[5].replace(/,/g, '')) || 0 });
+      hsns.push({ hsn: m[1], description: m[2].trim().slice(0, 60), qty: 1, rate: paise(m[3].replace(/,/g, '')), taxable: paise(m[4].replace(/,/g, '')), cgst: paise(m[5].replace(/,/g, '')) || 0 });
     }
 
     return {
@@ -275,12 +278,12 @@ const OcrEngine = {
       due_date: dueDate ? normalizeDate(dueDate) : null,
       supplier_name: supplier ? supplier.trim() : null,
       gstin,
-      taxable_amount: taxable != null ? parseFloat(taxable) : null,
-      cgst: cgst != null ? parseFloat(cgst) : null,
-      sgst: sgst != null ? parseFloat(sgst) : null,
-      igst: igst != null ? parseFloat(igst) : null,
-      tds_amount: tds != null ? parseFloat(tds) : null,
-      grand_total: grand != null ? parseFloat(grand) : null,
+      taxable_amount: paise(taxable),
+      cgst: paise(cgst),
+      sgst: paise(sgst),
+      igst: paise(igst),
+      tds_amount: paise(tds),
+      grand_total: paise(grand),
       hsns,
       confidence: t.includes('GSTIN') ? 0.96 : 0.72,
       engine: this.name,
@@ -338,11 +341,14 @@ const GstDataProvider = {
     const mismatches = [];
     for (const i of invs) {
       const g = (i.gstin_vendor ? g2bByGstinRef.get(`${i.gstin_vendor}|${i.invoice_no}`) : null) || g2bByRef.get(i.invoice_no);
-      const platformItc = (i.cgst || 0) + (i.sgst || 0) + (i.igst || 0);
+      const platformItc = Money.sum([Money.fromPaise(i.cgst || 0), Money.fromPaise(i.sgst || 0), Money.fromPaise(i.igst || 0)]);
       if (!g) {
-        mismatches.push({ invoice_no: i.invoice_no, vendor_gstin: i.gstin_vendor, vendor_name: i.vendor_name || '', platform_amount: platformItc, gstr2b_amount: 0, variance: platformItc, note: 'Supplier invoice not yet reflected in GSTR-2B' });
-      } else if (Math.abs((g.cgst + g.sgst + g.igst) - platformItc) > 1) {
-        mismatches.push({ invoice_no: i.invoice_no, vendor_gstin: i.gstin_vendor, vendor_name: i.vendor_name || '', platform_amount: platformItc, gstr2b_amount: g.cgst + g.sgst + g.igst, variance: inr(platformItc - (g.cgst + g.sgst + g.igst)), note: 'ITC amount differs from GSTR-2B' });
+        mismatches.push({ invoice_no: i.invoice_no, vendor_gstin: i.gstin_vendor, vendor_name: i.vendor_name || '', platform_amount: Number(platformItc.toPaise()), gstr2b_amount: 0, variance: Number(platformItc.toPaise()), note: 'Supplier invoice not yet reflected in GSTR-2B' });
+      } else {
+        const g2bItc = Money.sum([Money.fromPaise(g.cgst || 0), Money.fromPaise(g.sgst || 0), Money.fromPaise(g.igst || 0)]);
+        if (!g2bItc.equals(platformItc)) {
+          mismatches.push({ invoice_no: i.invoice_no, vendor_gstin: i.gstin_vendor, vendor_name: i.vendor_name || '', platform_amount: Number(platformItc.toPaise()), gstr2b_amount: Number(g2bItc.toPaise()), variance: Number(platformItc.minus(g2bItc).toPaise()), note: 'ITC amount differs from GSTR-2B' });
+        }
       }
     }
     // Tally-imported purchase vouchers are authoritative once imported:
@@ -364,22 +370,22 @@ const GstDataProvider = {
         if (seen.has(ref)) continue;
         seen.add(ref);
         const g = (gstin ? g2bByGstinRef.get(`${gstin}|${ref}`) : null) || g2bByRef.get(ref);
-        const platformAmount = Math.abs(v.amount || 0);
+        const platformAmount = Money.fromPaise(Math.abs(Number(v.amount) || 0));
         if (!g) {
-          mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: 0, variance: platformAmount, note: 'Tally purchase voucher not yet reflected in GSTR-2B' });
+          mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: Number(platformAmount.toPaise()), gstr2b_amount: 0, variance: Number(platformAmount.toPaise()), note: 'Tally purchase voucher not yet reflected in GSTR-2B' });
         } else if (amountCheckable) {
           // A multi-ref voucher's total cannot be compared per invoice; only
           // presence is checked for those.
-          const g2bAmount = (g.taxable || 0) + (g.cgst || 0) + (g.sgst || 0) + (g.igst || 0);
-          if (Math.abs(g2bAmount - platformAmount) > 1) {
-            mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: platformAmount, gstr2b_amount: g2bAmount, variance: inr(platformAmount - g2bAmount), note: 'Tally purchase voucher amount differs from GSTR-2B' });
+          const g2bAmount = Money.sum([Money.fromPaise(g.taxable || 0), Money.fromPaise(g.cgst || 0), Money.fromPaise(g.sgst || 0), Money.fromPaise(g.igst || 0)]);
+          if (!g2bAmount.equals(platformAmount)) {
+            mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: Number(platformAmount.toPaise()), gstr2b_amount: Number(g2bAmount.toPaise()), variance: Number(platformAmount.minus(g2bAmount).toPaise()), note: 'Tally purchase voucher amount differs from GSTR-2B' });
           }
         }
       }
     }
     // Credit/Debit Notes: GSTR-2B's CDNR section is compared against imported
-    // Credit/Debit Note vouchers by GSTIN + invoice ref + amount (same ±1 rule
-    // as the purchase comparison). Imported note vouchers are authoritative.
+    // Credit/Debit Note vouchers by GSTIN + invoice ref + exact amount.
+    // Imported note vouchers are authoritative.
     const noteVouchers = await all(`SELECT voucher_number, amount, party_name, entry_json FROM tally_vouchers WHERE company_id = ? AND voucher_type IN ('Credit Note', 'Debit Note') AND cancelled = 0`, [companyId]);
     const cdnrRows = JSON.parse(snap.cdnr_json || '[]');
     const cdnrByGstinRef = new Map(cdnrRows.map((c) => [`${c.gstin || ''}|${c.invoice_no}`, c]));
@@ -395,13 +401,13 @@ const GstDataProvider = {
         if (seen.has(ref)) continue;
         seen.add(ref);
         const c = (gstin ? cdnrByGstinRef.get(`${gstin}|${ref}`) : null) || cdnrByRef.get(ref);
-        const noteAmount = Math.abs(v.amount || 0);
+        const noteAmount = Money.fromPaise(Math.abs(Number(v.amount) || 0));
         if (!c) {
-          mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: noteAmount, gstr2b_amount: 0, variance: noteAmount, note: 'Tally credit/debit note voucher not yet reflected in GSTR-2B' });
+          mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: Number(noteAmount.toPaise()), gstr2b_amount: 0, variance: Number(noteAmount.toPaise()), note: 'Tally credit/debit note voucher not yet reflected in GSTR-2B' });
         } else if (amountCheckable) {
-          const cdnrAmount = (c.taxable || 0) + (c.cgst || 0) + (c.sgst || 0) + (c.igst || 0);
-          if (Math.abs(cdnrAmount - noteAmount) > 1) {
-            mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: noteAmount, gstr2b_amount: cdnrAmount, variance: inr(noteAmount - cdnrAmount), note: 'Tally credit/debit note voucher amount differs from GSTR-2B' });
+          const cdnrAmount = Money.sum([Money.fromPaise(c.taxable || 0), Money.fromPaise(c.cgst || 0), Money.fromPaise(c.sgst || 0), Money.fromPaise(c.igst || 0)]);
+          if (!cdnrAmount.equals(noteAmount)) {
+            mismatches.push({ invoice_no: ref, vendor_gstin: gstin, vendor_name: v.party_name || '', platform_amount: Number(noteAmount.toPaise()), gstr2b_amount: Number(cdnrAmount.toPaise()), variance: Number(noteAmount.minus(cdnrAmount).toPaise()), note: 'Tally credit/debit note voucher amount differs from GSTR-2B' });
           }
         }
       }
@@ -415,17 +421,23 @@ const GstDataProvider = {
   async exportGstr3b(companyId, period) {
     const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? AND period = ? ORDER BY fetched_at DESC LIMIT 1', [companyId, period]);
     const invs = await all(`SELECT * FROM invoices WHERE company_id = ? AND invoice_date LIKE ?`, [companyId, period + '%']);
-    const outSales = invs.filter(i => i.status !== 'rejected').reduce((s, i) => s + i.taxable_amount, 0);
-    const outGst = invs.filter(i => i.status !== 'rejected').reduce((s, i) => s + (i.cgst || 0) + (i.sgst || 0) + (i.igst || 0), 0);
-    const itc = snap ? snap.total_itc : 0;
+    const active = invs.filter(i => i.status !== 'rejected');
+    const sum = (key) => Money.sum(active.map((i) => Money.fromPaise(i[key] || 0)));
+    const outSales = sum('taxable_amount');
+    const outCgst = sum('cgst');
+    const outSgst = sum('sgst');
+    const outIgst = sum('igst');
+    const outGst = outCgst.plus(outSgst).plus(outIgst);
+    const itc = Money.fromPaise(snap ? snap.total_itc : 0);
+    const netPayable = outGst.minus(itc);
     const rows = [
       ['Period', period],
-      ['Outward taxable supplies (3.1a)', inr(outSales)],
-      ['Outward CGST (3.1a)', inr(invs.reduce((s, i) => s + (i.cgst || 0), 0))],
-      ['Outward SGST (3.1a)', inr(invs.reduce((s, i) => s + (i.sgst || 0), 0))],
-      ['Outward IGST (3.1a)', inr(invs.reduce((s, i) => s + (i.igst || 0), 0))],
-      ['ITC available from GSTR-2B (4A)', inr(itc)],
-      ['Net GST payable', Math.max(0, inr(outGst - itc))],
+      ['Outward taxable supplies (3.1a)', rupees(outSales)],
+      ['Outward CGST (3.1a)', rupees(outCgst)],
+      ['Outward SGST (3.1a)', rupees(outSgst)],
+      ['Outward IGST (3.1a)', rupees(outIgst)],
+      ['ITC available from GSTR-2B (4A)', rupees(itc)],
+      ['Net GST payable', rupees(netPayable.isNegative() ? Money.fromPaise(0) : netPayable)],
     ];
     return rows.map(r => r.join(',')).join('\n');
   },
@@ -454,10 +466,10 @@ async function processEmail(mailId) {
   const invId = uid('inv');
   const vendor = await get('SELECT * FROM vendors WHERE company_id = ? AND (gstin = ? OR lower(name) LIKE ?) LIMIT 1',
     [mail.company_id, ocr.gstin || '', `%${(ocr.supplier_name || '').split(' ')[0]}%`]);
-  const taxable = ocr.taxable_amount != null ? ocr.taxable_amount : 0;
-  const cgst = ocr.cgst || 0, sgst = ocr.sgst || 0, igst = ocr.igst || 0;
-  const tds = ocr.tds_amount || 0;
-  const gross = ocr.grand_total != null ? ocr.grand_total : taxable + cgst + sgst + igst;
+  const taxable = Money.fromPaise(ocr.taxable_amount != null ? ocr.taxable_amount : 0);
+  const cgst = Money.fromPaise(ocr.cgst || 0), sgst = Money.fromPaise(ocr.sgst || 0), igst = Money.fromPaise(ocr.igst || 0);
+  const tds = Money.fromPaise(ocr.tds_amount || 0);
+  const gross = ocr.grand_total != null ? Money.fromPaise(ocr.grand_total) : taxable.plus(cgst).plus(sgst).plus(igst);
   // Idempotent capture: a supplier invoice forwarded twice must not create a
   // duplicate row (company + invoice number are unique).
   const existing = ocr.invoice_no
@@ -474,9 +486,9 @@ async function processEmail(mailId) {
     invoice_date: ocr.invoice_date || todayStr(),
     due_date: ocr.due_date || addDays(todayStr(), 30),
     source: 'email', status: 'captured',
-    gross_amount: inr(gross), taxable_amount: inr(taxable),
-    cgst: inr(cgst), sgst: inr(sgst), igst: inr(igst), cess: 0,
-    tds_amount: inr(tds), net_payable: inr(gross - tds),
+    gross_amount: Number(gross.toPaise()), taxable_amount: Number(taxable.toPaise()),
+    cgst: Number(cgst.toPaise()), sgst: Number(sgst.toPaise()), igst: Number(igst.toPaise()), cess: 0,
+    tds_amount: Number(tds.toPaise()), net_payable: Number(gross.minus(tds).toPaise()),
     gstin_vendor: ocr.gstin,
     hsns: JSON.stringify(ocr.hsns),
     three_way_match: 'none',
@@ -498,8 +510,8 @@ async function createApprovalChain(companyId, invoiceId) {
   const inv = await get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
   const settings = await get('SELECT settings FROM companies WHERE id = ?', [companyId]);
   const cfg = JSON.parse(settings.settings || '{}');
-  const threshold = cfg.cfo_approval_threshold || 100000;
-  await insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 1, required_role: 'finance_manager', threshold_note: `<= ₹${threshold.toLocaleString('en-IN')} route`, status: 'pending' });
+  const threshold = Number(Money.fromRupees(cfg.cfo_approval_threshold || 100000).toPaise());
+  await insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 1, required_role: 'finance_manager', threshold_note: `<= ₹${Money.fromPaise(threshold).toRupees()} route`, status: 'pending' });
   if (inv.gross_amount > threshold) {
     await insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 2, required_role: 'cfo', threshold_note: `> ₹${threshold.toLocaleString('en-IN')} requires CFO`, status: 'pending' });
   }

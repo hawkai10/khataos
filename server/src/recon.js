@@ -1,13 +1,39 @@
 'use strict';
 
 // Automatic bank reconciliation engine.
-// Primary: amount, date, reference. Fuzzy: tolerance windows. Combined:
-// multiple bank debits sum to one payment. Target: >= 70% automatic matching.
+// Primary: amount (EXACT integer paise), date, reference. Fuzzy: date windows
+// and combined (multi-debit) matches — never amount tolerance. The only
+// permitted amount slack is the explicit, configurable inward-remittance bank
+// charge rule (RECON_BANK_FEE_TOLERANCE_PAISE); everything else must match to
+// the paisa. Target: >= 70% automatic matching.
 
 const { all, get, insert, run } = require('./db');
-const { uid, nowIso, diffDays, inr, daysAgo } = require('./util');
+const { uid, nowIso, diffDays, round2, daysAgo } = require('./util');
+const { Money } = require('./money');
+const { formatINR } = require('./util');
 
-function amountClose(a, b, tol = 1) { return Math.abs(a - b) <= tol; }
+// Explicit, named business rule: a bank CREDIT may fall short of its
+// Tally Receipt/Sales voucher by up to this many paise and still be treated
+// as the same money (inward remittance net of bank charges). Default 0 =
+// exact matching. Set RECON_BANK_FEE_TOLERANCE_PAISE (e.g. 100 = ₹1.00).
+function bankChargeTolerancePaise() {
+  const v = Number(process.env.RECON_BANK_FEE_TOLERANCE_PAISE || 0);
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+}
+
+function amountEquals(a, b) { return Money.fromPaise(a).equals(Money.fromPaise(b)); }
+
+// Is `bankAmt` an inward credit that is within the explicit bank-charge rule
+// of `voucherAmt`? Only credits may be short (charges reduce the remittance);
+// the voucher must be an inward direction (receipt/sales/debit note).
+function inwardChargeOk(voucher, bankAmt, voucherAmt, outflow) {
+  if (outflow) return false;
+  const t = String(voucher.voucher_type || '').toLowerCase();
+  if (!['receipt', 'sales', 'debit note'].includes(t)) return false;
+  const tol = Money.fromPaise(bankChargeTolerancePaise());
+  if (tol.isZero()) return false;
+  return bankAmt.lte(voucherAmt) && voucherAmt.minus(bankAmt).lte(tol);
+}
 
 function safeParse(json) {
   try { return JSON.parse(json || '[]'); } catch { return []; }
@@ -72,7 +98,7 @@ function findTallyMatch(txn, index) {
     // customer lands as a bank debit (outflow).
     return outflow ? ['payment', 'contra', 'journal', 'purchase', 'credit note'].includes(t) : ['receipt', 'sales', 'journal', 'debit note'].includes(t);
   };
-  const absAmt = Math.abs(Number(txn.amount) || 0);
+  const absAmt = Money.fromPaise(Math.abs(Number(txn.amount) || 0));
   // Strong pass: BILLALLOCATIONS ref ties to a KhataOS invoice or payment.
   // Tally-side document refs (invoices on purchase/sales/notes) count too.
   // Scanned across ALL vouchers so a ref conflict is flagged regardless of
@@ -81,8 +107,8 @@ function findTallyMatch(txn, index) {
     if (!v.billRefs.length) continue;
     const ref = v.billRefs.find((r) => index.invoiceNos.has(r) || index.payRefs.has(r) || index.tallyRefs.has(r));
     if (!ref) continue;
-    const voucherAmt = Math.abs(Number(v.amount) || 0);
-    if (!amountClose(absAmt, voucherAmt)) {
+    const voucherAmt = Money.fromPaise(Math.abs(Number(v.amount) || 0));
+    if (!voucherAmt.equals(absAmt) && !inwardChargeOk(v, absAmt, voucherAmt, outflow)) {
       return { mismatch: { voucher: v, ref, expected: absAmt, actual: voucherAmt } };
     }
     if (!directionOk(v)) continue;
@@ -90,8 +116,8 @@ function findTallyMatch(txn, index) {
   }
   const candidates = index.vouchers.filter(directionOk);
   for (const v of candidates) {
-    const voucherAmt = Math.abs(Number(v.amount) || 0);
-    if (!amountClose(absAmt, voucherAmt)) continue;
+    const voucherAmt = Money.fromPaise(Math.abs(Number(v.amount) || 0));
+    if (!voucherAmt.equals(absAmt) && !inwardChargeOk(v, absAmt, voucherAmt, outflow)) continue;
     if (Math.abs(diffDays(v.date, txn.txn_date)) > 3) continue;
     if (!v.party_name || !(index.vendorLedgers.has(v.party_name) || index.partyLedgers.has(v.party_name))) continue;
     return { match: { voucher: v, ref: null, type: 'fuzzy', confidence: 0.78 } };
@@ -172,16 +198,12 @@ async function matchAll(companyId) {
     const isDebit = txn.amount < 0;
     if (isDebit) {
       // 1) exact reference match
-      let hit = payments.find(p => (p.reference && p.reference === txn.ref_no) && amountClose(txn.amount, -p.net_amount));
+      let hit = payments.find(p => (p.reference && p.reference === txn.ref_no) && amountEquals(txn.amount, -p.net_amount));
       if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.99, 'auto'); auto++; continue; }
 
       // 2) exact amount + date window
-      hit = payments.find(p => amountClose(txn.amount, -p.net_amount) && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 3);
+      hit = payments.find(p => amountEquals(txn.amount, -p.net_amount) && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 3);
       if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.93, 'auto'); auto++; continue; }
-
-      // 3) fuzzy: amount within 1, date within 5 days
-      hit = payments.find(p => Math.abs(Math.abs(txn.amount) - p.net_amount) <= 1 && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 5);
-      if (hit) { await markMatched(txn.id, hit.id, 'fuzzy', 0.68, 'auto'); auto++; continue; }
     }
 
     // 4) real Tally voucher match (imported XML): bill-ref first, then
@@ -196,7 +218,7 @@ async function matchAll(companyId) {
         id: uid('rm'), company_id: companyId, bank_txn_id: txn.id, payment_id: null,
         tally_voucher_no: m.voucher.voucher_number, match_type: 'billref', confidence: 0.5,
         status: 'mismatch', matched_by: 'auto', matched_at: nowIso(),
-        notes: `Tally voucher #${m.voucher.voucher_number} references ${m.ref} but amount differs (bank ${inr(m.expected)} vs voucher ${inr(m.actual)})`,
+        notes: `Tally voucher #${m.voucher.voucher_number} references ${m.ref} but amount differs (bank ${formatINR(m.expected)} vs voucher ${formatINR(m.actual)})`,
       });
       continue;
     }
@@ -215,7 +237,7 @@ async function matchAll(companyId) {
     if (isDebit) {
       // 5) KhataOS invoice fallback (approved invoice, no payment, no Tally
       //    voucher imported yet). Labeled as KhataOS-side, not authoritative.
-      const hit = vouchers.find(v => amountClose(txn.amount, -v.net_payable) && Math.abs(diffDays(v.invoice_date, txn.txn_date)) <= 4);
+      const hit = vouchers.find(v => amountEquals(txn.amount, -v.net_payable) && Math.abs(diffDays(v.invoice_date, txn.txn_date)) <= 4);
       if (hit) {
         await insert('recon_matches', {
           id: uid('rm'), company_id: companyId, bank_txn_id: txn.id,
@@ -235,8 +257,8 @@ async function matchAll(companyId) {
     for (let j = i + 1; j < unmatched.length; j++) {
       const a = unmatched[i], b = unmatched[j];
       if (Math.abs(diffDays(a.txn_date, b.txn_date)) > 2) continue;
-      const sum = a.amount + b.amount;
-      const hit = payments.find(p => amountClose(sum, -p.net_amount));
+      const sum = Money.fromPaise(a.amount).plus(Money.fromPaise(b.amount));
+      const hit = payments.find(p => sum.equals(Money.fromPaise(p.net_amount).negate()));
       if (hit) {
         await markMatched(a.id, hit.id, 'combined', 0.55, 'auto');
         await markMatched(b.id, hit.id, 'combined', 0.55, 'auto');
@@ -246,7 +268,7 @@ async function matchAll(companyId) {
     }
   }
 
-  return { auto, total, accuracy: total ? inr((auto / total) * 100) : 0 };
+  return { auto, total, accuracy: total ? round2((auto / total) * 100) : 0 };
 }
 
 // Score for display: auto-matched / total posted txns (all accounts, 30 days).
@@ -263,9 +285,9 @@ async function score(companyId) {
   return {
     total, matched: stats.matched || 0, auto_matched: auto,
     manual_matched: (stats.matched || 0) - auto,
-    accuracy: total ? inr((auto / total) * 100) : 0,
+    accuracy: total ? round2((auto / total) * 100) : 0,
     target: 70,
   };
 }
 
-module.exports = { matchAll, score, markMatched, matchPending, autoVoucherMatch, findTallyMatch, loadTallyIndex, safeParse, billRefsOf };
+module.exports = { matchAll, score, markMatched, matchPending, autoVoucherMatch, findTallyMatch, loadTallyIndex, safeParse, billRefsOf, bankChargeTolerancePaise, amountEquals };

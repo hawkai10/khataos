@@ -10,7 +10,7 @@ const { GstDataProvider } = require('../adapters');
 const Gstn = require('../gstn');
 const Gst = require('../services/gst');
 const { bodyOf } = require('./validators');
-const { companyOf, parseUrl, queryParam } = require('./helpers');
+const { companyOf, parseUrl, queryParam, rupees, publicizeRows } = require('./helpers');
 
 async function register(fastify) {
   fastify.get('/api/gst/summary', async (request, reply) => {
@@ -18,13 +18,13 @@ async function register(fastify) {
     const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? ORDER BY period DESC LIMIT 1', [coId]);
     const liability = await Gst.netPayableSum(coId, ['approved', 'scheduled']);
     const committed = await Gst.netPayableSum(coId, ['approved', 'scheduled', 'pending_approval']);
-    const mismatches = await all(`SELECT * FROM gst_mismatches WHERE company_id = ? AND status = 'open' ORDER BY period DESC`, [coId]);
+    const mismatches = publicizeRows(await all(`SELECT * FROM gst_mismatches WHERE company_id = ? AND status = 'open' ORDER BY period DESC`, [coId]), 'gst_mismatches');
     const periods = await all('SELECT period, MAX(fetched_at) AS fetched_at FROM gstr2b_snapshots WHERE company_id = ? GROUP BY period ORDER BY period DESC', [coId]);
     reply.ok({
-      itc: snap ? snap.total_itc : 0, itc_cgst: snap ? snap.itc_cgst : 0,
-      itc_sgst: snap ? snap.itc_sgst : 0, itc_igst: snap ? snap.itc_igst : 0,
+      itc: snap ? rupees(snap.total_itc) : '0.00', itc_cgst: snap ? rupees(snap.itc_cgst) : '0.00',
+      itc_sgst: snap ? rupees(snap.itc_sgst) : '0.00', itc_igst: snap ? rupees(snap.itc_igst) : '0.00',
       period: snap ? snap.period : null, fetched_at: snap ? snap.fetched_at : null,
-      liability, committed, mismatch_count: mismatches.length, mismatches, periods,
+      liability: rupees(liability), committed: rupees(committed), mismatch_count: mismatches.length, mismatches, periods,
     });
   });
 
@@ -47,7 +47,7 @@ async function register(fastify) {
     if (type === 'gstr2b') {
       const snap = await get('SELECT * FROM gstr2b_snapshots WHERE company_id = ? AND period = ? ORDER BY fetched_at DESC LIMIT 1', [coId, period]);
       const rows = snap ? JSON.parse(snap.data_json || '[]') : [];
-      csv = 'period,gstin,invoice_no,taxable,cgst,sgst,igst\n' + rows.map((g) => `${period},${g.gstin},${g.invoice_no},${g.taxable},${g.cgst},${g.sgst},${g.igst}`).join('\n');
+      csv = 'period,gstin,invoice_no,taxable,cgst,sgst,igst\n' + rows.map((g) => `${period},${g.gstin},${g.invoice_no},${rupees(g.taxable)},${rupees(g.cgst)},${rupees(g.sgst)},${rupees(g.igst)}`).join('\n');
     } else {
       csv = 'field,amount\n' + await GstDataProvider.exportGstr3b(coId, period);
     }

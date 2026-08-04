@@ -7,13 +7,14 @@
 // source until the cutover completes). Column keys use the exact database
 // column names, so query results keep their current shapes byte-for-byte.
 //
-// Types: 'text' -> TEXT, 'real' -> REAL (SQLite) / DOUBLE PRECISION (PG),
+// Types: 'text' -> TEXT, 'money' -> INTEGER (SQLite) / BIGINT (PG) paise,
+// 'real' -> REAL (SQLite) / DOUBLE PRECISION (PG) for rates/quantities,
 // 'integer' -> INTEGER. Flags are INTEGER (never native booleans) so the
 // existing `= 1` checks keep working identically on every engine.
 // ============================================================================
 
 const { sqliteTable, text: sqliteText, integer: sqliteInteger, real: sqliteReal, index: sqliteIndex, uniqueIndex: sqliteUniqueIndex, unique: sqliteUnique, primaryKey: sqlitePrimaryKey, check: sqliteCheck } = require('drizzle-orm/sqlite-core');
-const { pgTable, text: pgText, integer: pgInteger, doublePrecision, index: pgIndex, uniqueIndex: pgUniqueIndex, unique: pgUnique, primaryKey: pgPrimaryKey, check: pgCheck } = require('drizzle-orm/pg-core');
+const { pgTable, text: pgText, integer: pgInteger, bigint: pgBigint, doublePrecision, index: pgIndex, uniqueIndex: pgUniqueIndex, unique: pgUnique, primaryKey: pgPrimaryKey, check: pgCheck } = require('drizzle-orm/pg-core');
 const { sql } = require('drizzle-orm');
 
 const TABLES = [
@@ -105,8 +106,8 @@ const TABLES = [
       external_id: { type: 'text' },
       txn_date: { type: 'text', notNull: true },
       value_date: { type: 'text' },
-      amount: { type: 'real', notNull: true },
-      balance_after: { type: 'real' },
+      amount: { type: 'money', notNull: true },
+      balance_after: { type: 'money' },
       description: { type: 'text' },
       mode: { type: 'text' },
       ref_no: { type: 'text' },
@@ -125,7 +126,7 @@ const TABLES = [
       company_id: { type: 'text', notNull: true },
       account_id: { type: 'text', notNull: true },
       date: { type: 'text', notNull: true },
-      closing_balance: { type: 'real', notNull: true },
+      closing_balance: { type: 'money', notNull: true },
       source: { type: 'text', default: 'aa' },
     },
     uniques: [{ name: 'cash_daily_account_date', cols: ['account_id', 'date'] }],
@@ -161,14 +162,14 @@ const TABLES = [
       due_date: { type: 'text' },
       source: { type: 'text', notNull: true },
       status: { type: 'text', notNull: true },
-      gross_amount: { type: 'real', notNull: true, default: 0 },
-      taxable_amount: { type: 'real', notNull: true, default: 0 },
-      cgst: { type: 'real', default: 0 },
-      sgst: { type: 'real', default: 0 },
-      igst: { type: 'real', default: 0 },
-      cess: { type: 'real', default: 0 },
-      tds_amount: { type: 'real', default: 0 },
-      net_payable: { type: 'real', default: 0 },
+      gross_amount: { type: 'money', notNull: true, default: 0 },
+      taxable_amount: { type: 'money', notNull: true, default: 0 },
+      cgst: { type: 'money', default: 0 },
+      sgst: { type: 'money', default: 0 },
+      igst: { type: 'money', default: 0 },
+      cess: { type: 'money', default: 0 },
+      tds_amount: { type: 'money', default: 0 },
+      net_payable: { type: 'money', default: 0 },
       gstin_vendor: { type: 'text' },
       hsns: { type: 'text', default: '[]' },
       purchase_order_no: { type: 'text' },
@@ -192,12 +193,12 @@ const TABLES = [
       hsn: { type: 'text' },
       description: { type: 'text' },
       qty: { type: 'real', default: 1 },
-      rate: { type: 'real', default: 0 },
-      taxable: { type: 'real', default: 0 },
-      cgst: { type: 'real', default: 0 },
-      sgst: { type: 'real', default: 0 },
-      igst: { type: 'real', default: 0 },
-      cess: { type: 'real', default: 0 },
+      rate: { type: 'money', default: 0 },
+      taxable: { type: 'money', default: 0 },
+      cgst: { type: 'money', default: 0 },
+      sgst: { type: 'money', default: 0 },
+      igst: { type: 'money', default: 0 },
+      cess: { type: 'money', default: 0 },
     },
   },
   {
@@ -223,7 +224,7 @@ const TABLES = [
       company_id: { type: 'text', notNull: true, ref: ['companies', 'id'] },
       vendor_id: { type: 'text', ref: ['vendors', 'id'] },
       invoice_ids: { type: 'text', default: '[]' },
-      amount: { type: 'real', notNull: true },
+      amount: { type: 'money', notNull: true },
       mode: { type: 'text', notNull: true },
       type: { type: 'text', notNull: true },
       status: { type: 'text', notNull: true },
@@ -234,8 +235,8 @@ const TABLES = [
       gateway_txn_id: { type: 'text' },
       gst_ledger: { type: 'text' },
       tds_section: { type: 'text' },
-      tds_amount: { type: 'real', default: 0 },
-      net_amount: { type: 'real', notNull: true },
+      tds_amount: { type: 'money', default: 0 },
+      net_amount: { type: 'money', notNull: true },
       initiated_by: { type: 'text' },
       approved_by: { type: 'text' },
       failure_reason: { type: 'text' },
@@ -267,10 +268,10 @@ const TABLES = [
       company_id: { type: 'text', notNull: true },
       period: { type: 'text', notNull: true },
       gstin: { type: 'text' },
-      total_itc: { type: 'real', default: 0 },
-      itc_cgst: { type: 'real', default: 0 },
-      itc_sgst: { type: 'real', default: 0 },
-      itc_igst: { type: 'real', default: 0 },
+      total_itc: { type: 'money', default: 0 },
+      itc_cgst: { type: 'money', default: 0 },
+      itc_sgst: { type: 'money', default: 0 },
+      itc_igst: { type: 'money', default: 0 },
       data_json: { type: 'text', default: '[]' },
       cdnr_json: { type: 'text', default: '[]' },
       source: { type: 'text', default: 'gstr2b' },
@@ -286,9 +287,9 @@ const TABLES = [
       invoice_no: { type: 'text' },
       vendor_gstin: { type: 'text' },
       vendor_name: { type: 'text' },
-      platform_amount: { type: 'real', default: 0 },
-      gstr2b_amount: { type: 'real', default: 0 },
-      variance: { type: 'real', default: 0 },
+      platform_amount: { type: 'money', default: 0 },
+      gstr2b_amount: { type: 'money', default: 0 },
+      variance: { type: 'money', default: 0 },
       status: { type: 'text', default: 'open' },
       note: { type: 'text' },
     },
@@ -407,7 +408,7 @@ const TABLES = [
       company_id: { type: 'text', notNull: true },
       name: { type: 'text', notNull: true },
       group_name: { type: 'text' },
-      opening_balance: { type: 'real', default: 0 },
+      opening_balance: { type: 'money', default: 0 },
       gstin: { type: 'text' },
       tally_guid: { type: 'text' },
       tally_alterid: { type: 'integer', default: 0 },
@@ -422,7 +423,7 @@ const TABLES = [
       voucher_number: { type: 'text' },
       voucher_type: { type: 'text' },
       date: { type: 'text' },
-      amount: { type: 'real', default: 0 },
+      amount: { type: 'money', default: 0 },
       party_name: { type: 'text' },
       entry_json: { type: 'text', default: '[]' },
       tally_guid: { type: 'text' },
@@ -461,7 +462,7 @@ function buildSqlite() {
   for (const def of TABLES) {
     const cols = {};
     for (const [key, c] of Object.entries(def.columns)) {
-      const t = c.type === 'text' ? sqliteText(key) : c.type === 'real' ? sqliteReal(key) : sqliteInteger(key);
+      const t = c.type === 'text' ? sqliteText(key) : c.type === 'real' ? sqliteReal(key) : c.type === 'money' ? sqliteInteger(key) : sqliteInteger(key);
       let col = t;
       if (c.notNull) col = col.notNull();
       if (c.default !== undefined) col = col.default(c.default);
@@ -490,7 +491,7 @@ function buildPg() {
   for (const def of TABLES) {
     const cols = {};
     for (const [key, c] of Object.entries(def.columns)) {
-      const t = c.type === 'text' ? pgText(key) : c.type === 'real' ? doublePrecision(key) : pgInteger(key);
+      const t = c.type === 'text' ? pgText(key) : c.type === 'real' ? doublePrecision(key) : c.type === 'money' ? pgBigint(key, { mode: 'number' }) : pgInteger(key);
       let col = t;
       if (c.notNull) col = col.notNull();
       if (c.default !== undefined) col = col.default(c.default);

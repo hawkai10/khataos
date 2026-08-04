@@ -5,7 +5,9 @@
 
 const { all, get, update } = require('../db');
 const { ApiError, audit } = require('../auth');
-const { todayStr, daysAhead, inr } = require('../util');
+const { todayStr, daysAhead } = require('../util');
+const { Money } = require('../money');
+const { publicize, rupees } = require('../api/helpers');
 
 async function getInvoiceDetail(coId, id) {
   const inv = await get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [id, coId]);
@@ -14,7 +16,7 @@ async function getInvoiceDetail(coId, id) {
   const lines = await all('SELECT * FROM invoice_lines WHERE invoice_id = ?', [inv.id]);
   const approvals = await all('SELECT * FROM approvals WHERE invoice_id = ? ORDER BY level', [inv.id]);
   const payments = await all('SELECT * FROM payments WHERE company_id = ? AND invoice_ids LIKE ?', [coId, '%' + inv.id + '%']);
-  return { ...inv, vendor, lines, approvals, payments };
+  return { ...publicize(inv, 'invoices'), vendor, lines: publicize(lines, 'invoice_lines'), approvals, payments: publicize(payments, 'payments') };
 }
 
 async function threeWayMatch(coId, invoiceId) {
@@ -47,16 +49,18 @@ async function dueAndOverdue(coId) {
   const overdue = await all(`SELECT i.*, v.name AS vendor_name FROM invoices i LEFT JOIN vendors v ON v.id = i.vendor_id
     WHERE i.company_id = ? AND i.status IN ('approved','scheduled') AND i.due_date < ? ORDER BY i.due_date`, [coId, todayStr()]);
   return {
-    rows, overdue,
-    due_amount: inr(rows.reduce((s, i) => s + i.net_payable, 0)),
-    overdue_amount: inr(overdue.reduce((s, i) => s + i.net_payable, 0)),
+    rows: publicize(rows, 'invoices'), overdue: publicize(overdue, 'invoices'),
+    due_amount: Money.sum(rows.map((i) => Money.fromPaise(i.net_payable || 0))).toPaise(),
+    overdue_amount: Money.sum(overdue.map((i) => Money.fromPaise(i.net_payable || 0))).toPaise(),
   };
 }
 
 async function pendingApprovals(coId, role) {
-  return all(`SELECT a.*, i.invoice_no, i.gross_amount, v.name AS vendor_name FROM approvals a
+  const rows = await all(`SELECT a.*, i.invoice_no, i.gross_amount, v.name AS vendor_name FROM approvals a
     JOIN invoices i ON i.id = a.invoice_id LEFT JOIN vendors v ON v.id = i.vendor_id
     WHERE a.company_id = ? AND a.status = 'pending' AND a.required_role = ? ORDER BY i.due_date LIMIT 8`, [coId, role]);
+  for (const r of rows) r.gross_amount = rupees(r.gross_amount);
+  return rows;
 }
 
 module.exports = { getInvoiceDetail, threeWayMatch, dueAndOverdue, pendingApprovals };

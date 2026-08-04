@@ -4,14 +4,15 @@
 // bank data refresh and Decentro connected-banking integration.
 
 const { all, get, insert, run } = require('../db');
-const { uid, nowIso, todayStr, inr } = require('../util');
+const { uid, nowIso, todayStr } = require('../util');
+const { Money } = require('../money');
 const { ApiError, audit } = require('../auth');
 const { BankDataProvider, TallyConnector } = require('../adapters');
 const Decentro = require('../decentro');
 const recon = require('../recon');
 const Cash = require('../services/cash');
 const { bodyOf, requireBodyFields } = require('./validators');
-const { companyOf, parseUrl, queryParam, queryInt } = require('./helpers');
+const { companyOf, parseUrl, queryParam, queryInt, rupees, publicizeRows } = require('./helpers');
 
 async function register(fastify) {
   fastify.get('/api/banks', async (request, reply) => {
@@ -25,7 +26,7 @@ async function register(fastify) {
     for (const a of rows) {
       const balance = await Cash.closingBalance(a.id);
       const unc = await Cash.accountUncleared(a.id);
-      out.push({ ...a, balance, uncleared: unc, source_label: a.source === 'aa' ? 'Account Aggregator' : 'Direct API' });
+      out.push({ ...a, balance: rupees(balance), uncleared: rupees(unc), source_label: a.source === 'aa' ? 'Account Aggregator' : 'Direct API' });
     }
     reply.ok(out);
   });
@@ -35,12 +36,12 @@ async function register(fastify) {
     const rows = await Cash.listBankAccounts(coId, '');
     const accounts = await Promise.all(rows.map(async (a) => {
       const balance = await Cash.closingBalance(a.id);
-      return { id: a.id, account_name: a.account_name, bank_name: a.bank_name, account_number: a.account_number, balance, source: a.source };
+      return { id: a.id, account_name: a.account_name, bank_name: a.bank_name, account_number: a.account_number, balance: rupees(balance), source: a.source };
     }));
-    const total = inr(accounts.reduce((s, a) => s + a.balance, 0));
-    const uncleared = await Cash.totalUncleared(coId);
+    const total = Money.sum(accounts.map((a) => Money.fromRupees(a.balance)));
+    const uncleared = rupees(await Cash.totalUncleared(coId));
     const week = await Cash.recentTransactions(coId, 7);
-    reply.ok({ accounts, total_available: total, uncleared, last_synced_at: await Cash.lastBankSync(coId) });
+    reply.ok({ accounts, total_available: total.toRupees(), uncleared, last_synced_at: await Cash.lastBankSync(coId), week: publicizeRows(week, 'bank_transactions') });
   });
 
   fastify.get('/api/cash/transactions', async (request, reply) => {
@@ -48,14 +49,14 @@ async function register(fastify) {
     const u = parseUrl(request);
     const account = queryParam(u, 'account') || '';
     const days = queryInt(u, 'days', 7);
-    reply.ok(await Cash.recentTransactions(coId, days, account || null));
+    reply.ok(publicizeRows(await Cash.recentTransactions(coId, days, account || null), 'bank_transactions'));
   });
 
   fastify.get('/api/cash/trend', async (request, reply) => {
     const coId = companyOf(request.user);
     const u = parseUrl(request);
     const days = queryInt(u, 'days', 30);
-    reply.ok(await Cash.cashTrend(coId, days));
+    reply.ok((await Cash.cashTrend(coId, days)).map((r) => ({ ...r, balance: rupees(r.balance) })));
   });
 
   fastify.post('/api/aa/consent/start', async (request, reply) => {
@@ -84,7 +85,7 @@ async function register(fastify) {
       opened_at: todayStr(),
     });
     const account = await get('SELECT * FROM bank_accounts WHERE id = ?', [accountId]);
-    await BankDataProvider.fetchTransactions(companyOf(user), { ...account, opening_balance: 1500000 + Math.floor(Math.random() * 500000) });
+    await BankDataProvider.fetchTransactions(companyOf(user), { ...account, opening_balance: Number(Money.fromRupees(1500000 + Math.floor(Math.random() * 500000)).toPaise()) });
     await run(`UPDATE onboarding_steps SET status='done', at=? WHERE company_id=? AND step='connect_bank'`, [nowIso(), companyOf(user)]);
     await audit(companyOf(user), user, 'aa.consent_approved', 'bank_account', accountId, { consent: consent_id });
     reply.ok({ consent: approved, account });
@@ -198,7 +199,7 @@ async function register(fastify) {
       await recon.matchAll(coId);
       await run(`UPDATE onboarding_steps SET status='done', at=? WHERE company_id=? AND step='connect_bank'`, [nowIso(), coId]);
       await audit(coId, request.user, 'bank.linked_decentro', 'bank_account', finalized.account.id, { account_number: linkRow.account_number, via: 'status_poll' });
-      reply.ok({ status: 'linked', account: finalized.account, transactions_pulled: finalized.pulled.inserted, present_balance: finalized.pulled.present_balance });
+      reply.ok({ status: 'linked', account: finalized.account, transactions_pulled: finalized.pulled.inserted, present_balance: rupees(finalized.pulled.present_balance) });
     } else {
       reply.ok({ status: String(poll.status || 'PENDING'), message: poll.message || 'still awaiting approval on the bank portal' });
     }
