@@ -5,7 +5,7 @@
 | Concern | MVP (this repo) | Production target | Why |
 | --- | --- | --- | --- |
 | API services | Node.js 22, built-in `node:http`, zero deps | Node.js (Fastify/NestJS) or Python | Node chosen for fast iteration and single language across stack |
-| Transactional DB | SQLite (`node:sqlite`) **or** PostgreSQL (in-process `pglite` / server via `KHATAOS_DATABASE_URL`) | PostgreSQL 16 (Aurora) | Storage layer is engine-swappable; same schema & async helpers across engines, verified by dual smoke suites |
+| Transactional DB | SQLite (drivers: `node:sqlite` for the custom wrapper, `@libsql/client` via `drizzle-orm/libsql` for the Drizzle layer — local `file:` URLs only) **or** PostgreSQL (in-process `pglite` / server via `KHATAOS_DATABASE_URL`) | PostgreSQL 16 (Aurora) | Storage layer is engine-swappable; same schema & async helpers across engines, verified by dual smoke suites |
 | Analytics | Derived queries + in-memory rollups | ClickHouse | 30-day cash trend + recon scoring need columnar scans |
 | Events | In-process async queue (see §4) | SQS + EventBridge / Kafka | Decouple slow bank/Tally/GST integrations from UI |
 | Region | localhost | AWS Mumbai (`ap-south-1`) | RBI data-localization for bank/PAN/GST data |
@@ -24,6 +24,13 @@ engine = sqlite      -> node:sqlite (zero-setup dev/demo)
 engine = pglite      -> in-process PostgreSQL (WASM) for dev/testing
 engine = postgres    -> KHATAOS_DATABASE_URL (production, AWS Mumbai)
 ```
+
+**SQLite driver note:** the SQLite engine is served by two drivers that share
+the same database file (WAL mode). The legacy custom wrapper uses Node's
+built-in `node:sqlite`; the Drizzle query-builder/migration layer uses
+`@libsql/client` (via `drizzle-orm/libsql`) with a local `file:` URL. That
+package is the same driver Turso uses for remote SQLite, but this app only
+ever constructs `file:` URLs — there is no remote/Turso engine mode.
 
 **End-state decision:** once every module runs on Drizzle, `db.js`'s
 `SCHEMA` string and the custom wrapper are deleted and the Drizzle

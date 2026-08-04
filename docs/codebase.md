@@ -23,9 +23,11 @@ khataos/
 ## Backend stack and boot flow
 
 Dependencies (server/package.json): **Fastify 5** (HTTP), **Drizzle ORM 0.45**
-(query builder + migrations), **fast-xml-parser 5** (Tally XML),
-**pg / @electric-sql/pglite / @libsql/client** (engines), **drizzle-kit** and
-**embedded-postgres** (dev only).
+(query builder + migrations), **fast-xml-parser 5** (Tally XML), **pg**
+(Postgres driver), **@electric-sql/pglite** (in-process Postgres),
+**@libsql/client** (SQLite driver for the Drizzle layer — local `file:` URLs
+only, no remote/Turso mode), plus **drizzle-kit** and **embedded-postgres**
+(dev only).
 
 Boot (`server/src/server.js`): load `.env` → seed the supported-bank reference
 directory (`seed.js`) → optionally bootstrap a test tenant (test hooks) →
