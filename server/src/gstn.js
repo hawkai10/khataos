@@ -123,8 +123,11 @@ function requireAuth() {
 }
 
 // ---- GSTR-2B ----
-// Live: GET {GSTR2B_PATH}/{gstin} (GSP-specific query params for period).
-// Mock: build a realistic GSP-shaped payload from platform invoices.
+// Real-only: GET {GSTR2B_PATH}/{gstin} (GSP-specific query params for period).
+// No mock/demo payload exists — without all GSTN_* credentials every call
+// refuses with 503, and without a validated auth token it refuses with 401.
+// (companyId is retained for the adapter interface; the GSP fetch is keyed by
+// gstin + period.)
 async function fetchGstr2bRaw(companyId, period, gstin) {
   if (!hasCreds()) throw notConfigured();
   requireAuth();

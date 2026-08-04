@@ -92,10 +92,11 @@ product will.
 
 ## 5. Adapter interfaces (real-only)
 
-Each adapter exposes a provider-agnostic interface and a `MOCK` implementation.
-Adapters only talk to real providers. An unconfigured provider refuses with
-`503` (see `server/src/config.js`); the CI gateway double (`PAYMENT_GATEWAY=test`)
-only transitions payment status and never fabricates bank data.
+Each adapter exposes a provider-agnostic interface and only talks to real
+providers — there are no mock implementations. An unconfigured provider refuses
+with `503` (see `server/src/config.js`); the CI gateway double
+(`PAYMENT_GATEWAY=test`) only transitions payment status and never fabricates
+bank data.
 
 | Adapter | Interface | Real provider (Phase 1) | Unconfigured behavior |
 | --- | --- | --- | --- |

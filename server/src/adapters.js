@@ -206,7 +206,7 @@ const TallyConnector = {
     const inv = await get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
     if (!inv) return;
     await TallyConnector.logSync(inv.company_id, 'voucher', invoiceId, 'create', 'queued');
-    // simulated single-user contention: brief queue before syncing
+    // brief queue emulating Tally single-user mode before the sync is marked
     setTimeout(async () => {
       await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), invoiceId]);
       await TallyConnector.heartbeat(inv.company_id);

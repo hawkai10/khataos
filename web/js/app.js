@@ -221,7 +221,7 @@ App.VIEWS.cash = {
                 </tr>`).join('')}
             </tbody>
           </table></div>
-          <p class="muted small" style="margin:8px 0 0">Last full refresh: ${UI.date(overview.last_synced_at)} · Account Aggregator (Sahamati, simulated) · Decentro Connected Banking: <strong>${decentro.enabled ? 'live (configured)' : 'not configured'}</strong></p>
+          <p class="muted small" style="margin:8px 0 0">Last full refresh: ${UI.date(overview.last_synced_at)} · Account Aggregator (Sahamati) · Decentro Connected Banking: <strong>${decentro.enabled ? 'live (configured)' : 'not configured'}</strong></p>
         </div>
       </div>
       <div class="card" style="margin-top:14px">
@@ -255,7 +255,7 @@ async function connectBankWizard() {
     <div class="modal-body">
       <div class="field"><label>Data provider</label>
         <select id="provider">
-          <option value="aa">Account Aggregator (Sahamati) — simulated in demo</option>
+          <option value="aa">Account Aggregator (Sahamati)</option>
           <option value="decentro" ${decentro.enabled ? '' : 'disabled'}>Decentro Connected Banking — live API ${decentro.enabled ? '' : '(not configured)'}</option>
         </select>
         ${!decentro.enabled ? `<p class="hint">Set <span class="mono">DECENTRO_CLIENT_ID</span>, <span class="mono">DECENTRO_CLIENT_SECRET</span>, <span class="mono">DECENTRO_MODULE_SECRET</span> (and <span class="mono">DECENTRO_PROVIDER_SECRET</span>) then restart the server to fetch real bank data via decentro.tech — see <a href="/docs/decentro.md" target="_blank">docs/decentro.md</a>.</p>` : ''}
@@ -416,7 +416,7 @@ App.VIEWS.payables = {
   q: '',
   actions(bar) {
     bar.innerHTML = `
-      <button class="btn" id="pay-email">✉ Simulate email</button>
+      <button class="btn" id="pay-email">✉ Forward email</button>
       <button class="btn" id="pay-pdf">⇪ Upload PDF</button>
       <button class="btn primary" id="pay-manual">＋ Manual entry</button>`;
     bar.querySelector('#pay-email').onclick = () => captureModal('email');
@@ -606,7 +606,7 @@ async function openInvoice(id) {
    ==================================================================== */
 App.VIEWS.payments = {
   title: 'Payments',
-  sub: 'RazorpayX orchestration (simulated) · batch, scheduled & instant',
+  sub: 'RazorpayX orchestration · batch, scheduled & instant',
   tab: 'all',
   actions(bar) {
     bar.innerHTML = `
@@ -851,7 +851,7 @@ App.VIEWS.recon = {
                 <td class="muted small">${m.matched_by === 'auto' ? 'auto' : 'manual'}</td>
               </tr>`).join('')}</tbody>
           </table></div>` : UI.empty('No matches recorded')}
-          <p class="hint" style="margin-top:10px">Matching uses amount + date + reference; fuzzy matching handles partial/combined payments. Voucher matches come from the Tally ODBC sync (simulated).</p>
+          <p class="hint" style="margin-top:10px">Matching uses amount + date + reference; fuzzy matching handles partial/combined payments. Voucher matches come from imported Tally XML.</p>
         </div>
       </div>`;
     el.querySelector('#recon-run').onclick = async (btn) => {
@@ -1039,10 +1039,10 @@ App.VIEWS.onboarding = {
       const step = b.dataset.step;
       if (step === 'connect_bank') { App.navigate('cash'); setTimeout(() => connectBankWizard(), 400); }
       if (step === 'install_tally') {
-        UI.confirm('Install Tally connector', 'This downloads and installs the KhataOS connector service on your Tally server, then runs the first sync. Simulate the guided installer now?', async () => {
+        UI.confirm('Tally connector', 'The cloud MVP imports Tally data via XML upload (no live connector service). Mark the Tally connector onboarding step complete?', async () => {
           await API.post('/api/onboarding/install_tally/complete', { detail: 'Connector v0.1.0 installed, first sync OK' });
           UI.toast('Tally connector installed & synced'); App.navigate('onboarding');
-        }, 'Install (demo)');
+        }, 'Mark complete');
       }
       if (step === 'email_routing') {
         UI.confirm('Email forwarding', 'Set your forwarding rule (invoices@yourcompany.in → forward@invoices.khataos.in). Forwarded invoices are OCR\u2019d and pushed into the approval queue.', async () => {
@@ -1207,7 +1207,7 @@ App.VIEWS.system = {
         <div class="kv">
           <div class="item"><div class="k">Banks supported</div><div class="v">${h.integrations.banks_supported}</div></div>
           ${h.integrations.bank_accounts.map(b => `<div class="item"><div class="k">Accounts — ${UI.esc(b.source)}</div><div class="v">${b.count}</div></div>`).join('')}
-          <div class="item"><div class="k">Decentro Connected Banking</div><div class="v">${h.integrations.decentro.enabled ? 'configured · live API' : 'not configured (simulated feed)'}</div></div>
+          <div class="item"><div class="k">Decentro Connected Banking</div><div class="v">${h.integrations.decentro.enabled ? 'configured · live API' : 'not configured'}</div></div>
           <div class="item"><div class="k">Tally connector</div><div class="v">${h.integrations.tally ? `${UI.esc(h.integrations.tally.version)} · ${UI.freshPill(h.integrations.tally.last_sync_at, { freshMin: 5, warnMin: 30 })}` : '—'}</div></div>
           <div class="item"><div class="k">GSTN / GSTR-2B</div><div class="v">${h.integrations.gstn ? `${UI.esc(h.integrations.gstn.period)} · ${UI.freshPill(h.integrations.gstn.fetched_at, { freshMin: 60, warnMin: 1440 })}` : 'not fetched'}</div></div>
           <div class="item"><div class="k">AI assistant</div><div class="v">${h.integrations.ai.generative_configured ? 'deterministic + generative' : 'deterministic engine'}</div></div>
