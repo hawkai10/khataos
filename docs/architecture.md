@@ -25,6 +25,13 @@ engine = pglite      -> in-process PostgreSQL (WASM) for dev/testing
 engine = postgres    -> KHATAOS_DATABASE_URL (production, AWS Mumbai)
 ```
 
+**End-state decision:** once every module runs on Drizzle, `db.js`'s
+`SCHEMA` string and the custom wrapper are deleted and the Drizzle
+descriptor (`src/db/schema.js`) is the single source of truth — it already
+generates both dialects and the complete baseline migrations. The dual
+definitions are a transitional arrangement only; see the migration roadmap
+in `docs/codebase.md` for the explicit cutover steps.
+
 The System Health page (`/api/system/health`, "System Health" in the nav)
 reports the live engine, table counts, event-queue depth, and every
 integration's status — the same endpoint the smoke tests assert against.

@@ -167,6 +167,36 @@ node tests\run-all.js --pg-live               # + real Postgres (embedded)
 - **Drizzle cutover** for the remaining modules (cash, invoices, payments,
   GST, admin), one module at a time, reusing the Tally pattern: explicit
   schema, `getDrizzle()`, versioned migrations, cross-engine parity tests.
+
+  **End-state decision (explicit): the Drizzle descriptor in
+  `src/db/schema.js` becomes the single source of truth, and `db.js`'s
+  `SCHEMA` is deleted once the cutover is complete.** Keeping both
+  definitions indefinitely would mean every schema change costs two edits
+  plus a CI drift gate forever, with no runtime benefit — and the Drizzle
+  descriptor already generates both dialects and the complete baseline
+  migrations (every table, FK, check, unique, and index, including the
+  legacy v1/v2 ones), so a fresh database needs no `SCHEMA` SQL at all.
+  Final cutover steps, in order:
+
+  1. Convert the remaining domain modules, services, seed, test hooks, and
+     the job queue to Drizzle query builder (the Tally pipeline is the
+     template). Migrate test data-seeding/assertions to Drizzle queries (or
+     a thin test-only helper).
+  2. Repurpose `tests/drizzle-schema.test.js`: drop the `db.js`-SCHEMA
+     comparison half and replace it with a "migrations match the descriptor"
+     check (apply the migrations to a fresh DB, then introspect
+     `sqlite_master` / `information_schema` against the descriptor). Keep
+     the SQLite/pglite/live-Postgres result-equality check unchanged.
+  3. Delete from `db.js`: `SCHEMA`, `PG_SCHEMA`, `MIGRATIONS`,
+     `SCHEMA_MIGRATIONS`, `translate()`, and the custom
+     `all/get/run/insert/update/exec` wrapper (the wrapper is the only
+     consumer of `SCHEMA`, so both go together). `getDrizzle()`,
+     `listTables`, and `countRows` remain the public surface.
+  4. Regenerate and verify the Drizzle baseline (`drizzle-kit generate` for
+     both dialects, then a fresh-DB smoke) so no legacy SQL is needed.
+     Because this project is pre-production, existing databases are
+     recreated from the Drizzle baseline — there is no supported in-place
+     upgrade path from the transitional schema.
 - **Production networking**: enable `KHATAOS_TRUST_PROXY=1` only behind a
   proxy that overwrites/strips `X-Forwarded-For`; a multi-instance deployment
   will move rate-limit state to a shared store (Redis) since the current
