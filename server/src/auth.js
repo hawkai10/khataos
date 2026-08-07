@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { all, get, insert, run, update } = require('./db');
+const { all, get, insert, run, getDrizzle, T } = require('./db');
 const { nowIso, uid, hashPassword } = require('./util');
 
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -86,8 +86,12 @@ function publicUser(u) {
   return { id: u.id, name: u.name, email: u.email, role: u.role, department: u.department, company_id: u.company_id };
 }
 
-async function audit(companyId, user, action, entity, entityId, details) {
-  await insert('audit_logs', {
+// `db` is optional: pass the enclosing Drizzle transaction so the audit row is
+// written atomically with the state change it describes; otherwise it resolves
+// the global Drizzle instance (a single standalone insert).
+async function audit(companyId, user, action, entity, entityId, details, db) {
+  const d = db || await getDrizzle();
+  await d.insert(T.audit_logs).values({
     id: uid('aud'), company_id: companyId,
     user_id: user ? user.id : null, user_name: user ? user.name : 'system',
     action, entity, entity_id: entityId,

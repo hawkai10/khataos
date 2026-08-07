@@ -3,7 +3,8 @@
 // Invoice service functions: detail assembly and the three-way match check
 // shared by the invoice routes.
 
-const { all, get, update } = require('../db');
+const { all, get, withTransaction, T } = require('../db');
+const { eq } = require('drizzle-orm');
 const { ApiError, audit } = require('../auth');
 const { todayStr, daysAhead } = require('../util');
 const { Money } = require('../money');
@@ -35,8 +36,10 @@ async function threeWayMatch(coId, invoiceId) {
       ? { status: 'mismatch', detail: `Qty variance vs receipt ${inv.receipt_note_no}; flagged for review` }
       : { status: 'matched', detail: `PO ${inv.purchase_order_no} ↔ RN ${inv.receipt_note_no} ✓` };
   }
-  await update('invoices', invoiceId, { three_way_match: result.status });
-  await audit(coId, null, 'invoice.three_way_match', 'invoice', invoiceId, result);
+  await withTransaction(async (tx) => {
+    await tx.update(T.invoices).set({ three_way_match: result.status }).where(eq(T.invoices.id, invoiceId));
+    await audit(coId, null, 'invoice.three_way_match', 'invoice', invoiceId, result, tx);
+  });
   return result;
 }
 

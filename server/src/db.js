@@ -27,6 +27,21 @@ const PRIMARY_DB = process.env.KHATAOS_DB || path.join(DATA_DIR, 'khataos.db');
 let DB_PATH = PRIMARY_DB;
 let DB_ENGINE = ENGINE === 'sqlite' ? 'sqlite' : ENGINE === 'pglite' ? 'pglite' : ENGINE === 'postgres' || /^postgres(ql)?:\/\//.test(DATABASE_URL) ? 'postgres' : ENGINE;
 
+// SQLite lock contention (WAL allows one writer at a time): both SQLite
+// connections wait this long for a busy lock before failing with SQLITE_BUSY
+// instead of aborting the first transaction that hits another writer. Applied
+// to the node:sqlite connection via PRAGMA and to the @libsql/Drizzle layer via
+// createClient({ timeout }) — @libsql propagates it to every connection it
+// opens, including ones created internally by db.transaction().
+const BUSY_TIMEOUT_MS = 5000;
+
+// Active-dialect Drizzle table descriptors (single engine per process, the same
+// choice tally-import.js already makes). Mutating use cases run through these
+// on a Drizzle instance or transaction — never through the wrapper — because on
+// SQLite the wrapper (node:sqlite) and Drizzle (@libsql/client) are two separate
+// connections, and a logical operation spanning both cannot be atomic.
+const T = DB_ENGINE === 'sqlite' ? schema.sqlite : schema.pg;
+
 function probeWritable(dir) {
   try {
     const probe = path.join(dir, `.khataos-probe-${process.pid}`);
@@ -236,6 +251,32 @@ CREATE TABLE IF NOT EXISTS payments (
   initiated_at TEXT,
   processed_at TEXT,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS payment_state_transitions (
+  id TEXT PRIMARY KEY,
+  payment_id TEXT NOT NULL REFERENCES payments(id),
+  company_id TEXT NOT NULL,
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  action TEXT,
+  changed_by TEXT,
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pst_payment_at ON payment_state_transitions(payment_id, at);
+
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  method TEXT NOT NULL,
+  route TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'processing',
+  response_status INTEGER,
+  response_body TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  UNIQUE(company_id, key)
 );
 
 CREATE TABLE IF NOT EXISTS recon_matches (
@@ -635,7 +676,7 @@ async function initDrizzle() {
     const { createClient } = require('@libsql/client');
     const { drizzle } = require('drizzle-orm/libsql');
     const { migrate } = require('drizzle-orm/libsql/migrator');
-    const client = createClient({ url: 'file:' + encodeURI(DB_PATH.split(path.sep).join('/')) });
+    const client = createClient({ url: 'file:' + encodeURI(DB_PATH.split(path.sep).join('/')), timeout: BUSY_TIMEOUT_MS });
     drizzleDb = drizzle(client, { schema: schema.sqlite });
     await migrate(drizzleDb, { migrationsFolder: path.join(migrationsRoot, 'sqlite') });
   } else if (DB_ENGINE === 'postgres') {
@@ -660,6 +701,7 @@ if (DB_ENGINE === 'sqlite') {
     sqliteDb = new DatabaseSync(PRIMARY_DB);
     sqliteDb.exec('PRAGMA journal_mode = WAL;');
     sqliteDb.exec('PRAGMA foreign_keys = ON;');
+    sqliteDb.exec('PRAGMA busy_timeout = ' + BUSY_TIMEOUT_MS + ';');
     sqliteDb.exec(SCHEMA);
     runMigrations((sql) => sqliteDb.exec(sql));
     runVersionedMigrations((sql) => sqliteDb.exec(sql), (sql) => sqliteDb.prepare(sql).all());
@@ -674,6 +716,7 @@ if (DB_ENGINE === 'sqlite') {
     sqliteDb = new DatabaseSync(DB_PATH);
     sqliteDb.exec('PRAGMA journal_mode = WAL;');
     sqliteDb.exec('PRAGMA foreign_keys = ON;');
+    sqliteDb.exec('PRAGMA busy_timeout = ' + BUSY_TIMEOUT_MS + ';');
     sqliteDb.exec(SCHEMA);
     runMigrations((sql) => sqliteDb.exec(sql));
     runVersionedMigrations((sql) => sqliteDb.exec(sql), (sql) => sqliteDb.prepare(sql).all());
@@ -766,6 +809,17 @@ async function getDrizzle() {
   return drizzleDb;
 }
 
+// Run a mutating use case as one atomic Drizzle transaction. Every statement in
+// `fn` must go through the `tx` handle it receives — a Drizzle transaction runs
+// on one dedicated connection, so any wrapper/db call inside would fall outside
+// the atomic unit (and on SQLite would touch a second connection entirely).
+// Never call this inside an already-open transaction: helpers receive the
+// enclosing `tx` and use it directly instead of opening a nested one.
+async function withTransaction(fn) {
+  const d = await getDrizzle();
+  return d.transaction(async (tx) => fn(tx));
+}
+
 async function update(table, id, obj) {
   await ready;
   const keys = Object.keys(obj);
@@ -788,4 +842,4 @@ async function countRows(table) {
   return Number(r ? r.c : 0);
 }
 
-module.exports = { all, get, run, insert, update, exec, listTables, countRows, getDrizzle, DB_PATH, DB_ENGINE, DATABASE_URL };
+module.exports = { all, get, run, insert, update, exec, listTables, countRows, getDrizzle, withTransaction, T, BUSY_TIMEOUT_MS, DB_PATH, DB_ENGINE, DATABASE_URL };

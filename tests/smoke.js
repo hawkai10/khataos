@@ -50,6 +50,9 @@ function check(name, cond, extra = '') {
 async function api(method, p, body, token, extraHeaders = {}) {
   const headers = { 'content-type': 'application/json', ...extraHeaders };
   if (token) headers.authorization = 'Bearer ' + token;
+  // Financial endpoints require an Idempotency-Key; a fresh key per call keeps
+  // the smoke flow linear (no replay dedupe across distinct actions).
+  if (method === 'POST') headers['idempotency-key'] = 'smoke-' + Date.now() + '-' + Math.random().toString(36).slice(2);
   const resp = await fetch(BASE + p, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const json = await resp.json();
   if (!resp.ok) {

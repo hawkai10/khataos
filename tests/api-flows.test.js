@@ -26,8 +26,15 @@ async function check(name, fn) {
   catch (e) { failed++; console.log('  FAIL  ' + name + ' - ' + e.message); }
 }
 
+// Financial endpoints require an Idempotency-Key; give every call a fresh one
+// so the tests exercise route validation, not idempotency dedupe.
+let seq = 0;
+function withIdem(headers) {
+  return { ...(headers || {}), 'idempotency-key': `flows-${Date.now()}-${seq++}` };
+}
+
 async function expectStatus(app, method, routePath, headers, payload, status) {
-  const res = await app.inject({ method, url: routePath, headers, payload: payload === undefined ? undefined : JSON.stringify(payload) });
+  const res = await app.inject({ method, url: routePath, headers: withIdem(headers), payload: payload === undefined ? undefined : JSON.stringify(payload) });
   assert.strictEqual(res.statusCode, status, `${method} ${routePath}: expected ${status}, got ${res.statusCode} (${res.body.slice(0, 120)})`);
 }
 

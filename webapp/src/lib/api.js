@@ -27,8 +27,17 @@ export function clearSession() {
   localStorage.removeItem('khataos_user');
 }
 
+// Fresh key per request (see web/js/api.js for the retry contract): the
+// server's conditional-update guards stop double-click duplicates; clients
+// that retry should reuse the key of the original attempt.
+function idemKey() {
+  if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 export async function api(method, path, body) {
   const headers = { 'content-type': 'application/json' };
+  if (method === 'POST' || method === 'PUT') headers['idempotency-key'] = idemKey();
   const resp = await fetch(path, {
     method,
     headers,

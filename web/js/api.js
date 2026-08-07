@@ -3,8 +3,18 @@
 const API = {
   user: JSON.parse(localStorage.getItem('khataos_user') || 'null'),
 
+  // Fresh key per request: a browser double-click produces two different keys,
+  // so the server-side conditional-update guards are what stop the duplicate
+  // dispatch. Clients that implement retry should reuse the same key across
+  // attempts of the same logical action to get response replay.
+  idemKey() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  },
+
   async req(method, path, body) {
     const headers = { 'content-type': 'application/json' };
+    if (method === 'POST' || method === 'PUT') headers['idempotency-key'] = this.idemKey();
     const resp = await fetch(path, {
       method,
       headers,

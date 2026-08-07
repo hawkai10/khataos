@@ -89,7 +89,12 @@ export function Payments({ user }) {
                           <CheckCircle2 className="h-3.5 w-3.5" /> Approve
                         </Button>
                       ) : null}
-                      {['approved', 'pending_approval'].includes(p.status) && canAct ? (
+                      {/*
+                        Execute is server-guarded to approved payments — a
+                        pending_approval payment must be approved first
+                        (executing it would bypass the approval threshold).
+                      */}
+                      {p.status === 'approved' && canAct ? (
                         <Button size="sm" onClick={() => act(() => post(`/api/payments/${p.id}/execute`), 'Payment sent for execution')}>
                           <Play className="h-3.5 w-3.5" /> Execute now
                         </Button>

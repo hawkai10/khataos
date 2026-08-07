@@ -3,7 +3,8 @@
 // Cash & banks domain (Fastify plugin): bank accounts, cash views, AA consent,
 // bank data refresh and Decentro connected-banking integration.
 
-const { all, get, insert, run } = require('../db');
+const { all, get, insert, withTransaction, T } = require('../db');
+const { eq, and } = require('drizzle-orm');
 const { uid, nowIso, todayStr } = require('../util');
 const { Money } = require('../money');
 const { ApiError, audit } = require('../auth');
@@ -86,8 +87,10 @@ async function register(fastify) {
     });
     const account = await get('SELECT * FROM bank_accounts WHERE id = ?', [accountId]);
     await BankDataProvider.fetchTransactions(companyOf(user), { ...account, opening_balance: Number(Money.fromRupees(1500000 + Math.floor(Math.random() * 500000)).toPaise()) });
-    await run(`UPDATE onboarding_steps SET status='done', at=? WHERE company_id=? AND step='connect_bank'`, [nowIso(), companyOf(user)]);
-    await audit(companyOf(user), user, 'aa.consent_approved', 'bank_account', accountId, { consent: consent_id });
+    await withTransaction(async (tx) => {
+      await tx.update(T.onboarding_steps).set({ status: 'done', at: nowIso() }).where(and(eq(T.onboarding_steps.company_id, companyOf(user)), eq(T.onboarding_steps.step, 'connect_bank')));
+      await audit(companyOf(user), user, 'aa.consent_approved', 'bank_account', accountId, { consent: consent_id }, tx);
+    });
     reply.ok({ consent: approved, account });
   });
 
@@ -112,17 +115,23 @@ async function register(fastify) {
         skipped++; // provider unconfigured or failed; never fabricate data
         continue;
       }
-      for (const t of txns) {
-        const exists = await get('SELECT id FROM bank_transactions WHERE account_id = ? AND external_id = ?', [a.id, t.external_id]);
-        if (exists) continue;
-        await insert('bank_transactions', {
-          id: uid('btx'), company_id: coId, account_id: a.id, external_id: t.external_id,
-          txn_date: t.txn_date, value_date: t.value_date, amount: t.amount,
-          balance_after: t.balance_after, description: t.description, mode: t.mode,
-          ref_no: t.ref_no, status: t.status, raw_json: JSON.stringify(t), created_at: nowIso(),
-        });
-        added++;
-      }
+      // Each account's statement ingestion is one transaction — a failure can't
+      // leave a half-imported statement for a single account.
+      added += await withTransaction(async (tx) => {
+        let n = 0;
+        for (const t of txns) {
+          const exists = (await tx.select({ id: T.bank_transactions.id }).from(T.bank_transactions).where(and(eq(T.bank_transactions.account_id, a.id), eq(T.bank_transactions.external_id, t.external_id))).limit(1))[0];
+          if (exists) continue;
+          await tx.insert(T.bank_transactions).values({
+            id: uid('btx'), company_id: coId, account_id: a.id, external_id: t.external_id,
+            txn_date: t.txn_date, value_date: t.value_date, amount: t.amount,
+            balance_after: t.balance_after, description: t.description, mode: t.mode,
+            ref_no: t.ref_no, status: t.status, raw_json: JSON.stringify(t), created_at: nowIso(),
+          });
+          n++;
+        }
+        return n;
+      });
     }
     const stats = await recon.matchAll(coId);
     const voucherMatched = await recon.autoVoucherMatch(coId, 7);
@@ -154,17 +163,19 @@ async function register(fastify) {
     });
 
     const linkId = uid('dl');
-    await insert('decentro_links', {
-      id: linkId, company_id: coId, account_number: b.account_number,
-      mobile: b.mobile || null, customer_id: b.customer_id || null,
-      bank_code: b.bank_code || (b.ifsc ? b.ifsc.toUpperCase().slice(0, 4) : null),
-      status: result.redirect_url ? 'pending' : 'failed',
-      decentro_txn_id: result.decentroTxnId || null,
-      redirect_url: result.redirect_url,
-      last_error: result.redirect_url ? null : (result.message || 'no redirect url returned'),
-      created_at: nowIso(),
+    await withTransaction(async (tx) => {
+      await tx.insert(T.decentro_links).values({
+        id: linkId, company_id: coId, account_number: b.account_number,
+        mobile: b.mobile || null, customer_id: b.customer_id || null,
+        bank_code: b.bank_code || (b.ifsc ? b.ifsc.toUpperCase().slice(0, 4) : null),
+        status: result.redirect_url ? 'pending' : 'failed',
+        decentro_txn_id: result.decentroTxnId || null,
+        redirect_url: result.redirect_url,
+        last_error: result.redirect_url ? null : (result.message || 'no redirect url returned'),
+        created_at: nowIso(),
+      });
+      await audit(coId, request.user, 'bank.link_initiated', 'bank', b.account_number, { provider: 'decentro', decentro_status: result.status, response_code: result.responseCode }, tx);
     });
-    await audit(coId, request.user, 'bank.link_initiated', 'bank', b.account_number, { provider: 'decentro', decentro_status: result.status, response_code: result.responseCode });
 
     if (!result.redirect_url) {
       throw new ApiError(502, `Decentro did not return a redirect URL (${result.message || result.status || 'unknown'}) — account may already be linked; check link status instead.`);
@@ -197,8 +208,10 @@ async function register(fastify) {
         name: b.name, ifsc: b.ifsc, bank_code: linkRow.bank_code,
       });
       await recon.matchAll(coId);
-      await run(`UPDATE onboarding_steps SET status='done', at=? WHERE company_id=? AND step='connect_bank'`, [nowIso(), coId]);
-      await audit(coId, request.user, 'bank.linked_decentro', 'bank_account', finalized.account.id, { account_number: linkRow.account_number, via: 'status_poll' });
+      await withTransaction(async (tx) => {
+        await tx.update(T.onboarding_steps).set({ status: 'done', at: nowIso() }).where(and(eq(T.onboarding_steps.company_id, coId), eq(T.onboarding_steps.step, 'connect_bank')));
+        await audit(coId, request.user, 'bank.linked_decentro', 'bank_account', finalized.account.id, { account_number: linkRow.account_number, via: 'status_poll' }, tx);
+      });
       reply.ok({ status: 'linked', account: finalized.account, transactions_pulled: finalized.pulled.inserted, present_balance: rupees(finalized.pulled.present_balance) });
     } else {
       reply.ok({ status: String(poll.status || 'PENDING'), message: poll.message || 'still awaiting approval on the bank portal' });
@@ -223,12 +236,16 @@ async function register(fastify) {
     if (linked) {
       const finalized = await Decentro.finalizeLink(coId, accountNumber, { bank_code: linkRow ? linkRow.bank_code : null });
       await recon.matchAll(coId);
-      await run(`UPDATE onboarding_steps SET status='done', at=? WHERE company_id=? AND step='connect_bank'`, [nowIso(), coId]);
-      await audit(coId, null, 'bank.linked_decentro_webhook', 'bank_account', finalized.account.id, { account_number: accountNumber, status });
+      await withTransaction(async (tx) => {
+        await tx.update(T.onboarding_steps).set({ status: 'done', at: nowIso() }).where(and(eq(T.onboarding_steps.company_id, coId), eq(T.onboarding_steps.step, 'connect_bank')));
+        await audit(coId, null, 'bank.linked_decentro_webhook', 'bank_account', finalized.account.id, { account_number: accountNumber, status }, tx);
+      });
       reply.ok({ ok: true, linked: true, account_id: finalized.account.id, transactions_pulled: finalized.pulled.inserted });
     } else {
-      if (linkRow) await run(`UPDATE decentro_links SET status = 'failed', last_error = ? WHERE id = ?`, [String(status || b.status || '').slice(0, 200), linkRow.id]);
-      await audit(coId, null, 'bank.link_rejected', 'bank', accountNumber, { status });
+      await withTransaction(async (tx) => {
+        if (linkRow) await tx.update(T.decentro_links).set({ status: 'failed', last_error: String(status || b.status || '').slice(0, 200) }).where(eq(T.decentro_links.id, linkRow.id));
+        await audit(coId, null, 'bank.link_rejected', 'bank', accountNumber, { status }, tx);
+      });
       reply.ok({ ok: true, linked: false, status });
     }
   });

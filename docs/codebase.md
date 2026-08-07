@@ -65,10 +65,31 @@ paisa; the only permitted amount slack is the explicit, configurable
 inward-remittance bank-charge rule (`RECON_BANK_FEE_TOLERANCE_PAISE`, default
 0 = exact), applied to bank credits only.
 
-**Migration status:** the Tally import pipeline is fully converted to Drizzle
-queries; all other modules still use the custom wrapper. Both coexist during
-the transition (`getDrizzle()` fails loudly for converted code, the wrapper
-keeps working for everything else).
+**Transactions:** every multi-statement mutating use case (invoice capture /
+approve / reject, payment create / approve / execute / batch, Tally import,
+Decentro statement pull, reconciliation passes, gateway execution, GST mismatch
+scans, email capture) runs inside a Drizzle `db.transaction()` — see
+`withTransaction` in `db.js`. A failure halfway through a flow rolls back the
+whole use case instead of leaving an orphan (an invoice with no approval chain,
+a `scheduled` invoice with no payment, a half-imported Tally export). Both
+SQLite connections set a 5s `busy_timeout` (`PRAGMA` on `node:sqlite`,
+`createClient({ timeout })` on `@libsql`).
+
+**The atomicity constraint:** on SQLite the wrapper (`node:sqlite`) and the
+Drizzle layer (`@libsql/client`) are two separate connections and cannot share a
+transaction. So every statement of a transactional flow — including its helper
+writes like `audit`, the approval chain and queue jobs — must go through the
+`tx` handle; a wrapper call inside an open transaction would silently fall
+outside the atomic unit (and hangs single-connection engines like pglite).
+`audit`, `queue.enqueue`, `createApprovalChain`, `PaymentGateway.createBatch`,
+`TallyConnector.logSync/heartbeat`, `recon.markMatched`, `tally-mapping.autoMap`
+etc. all accept an optional trailing `db`/`tx` handle for this reason.
+
+**Migration status:** the Tally import pipeline is fully converted to Drizzle,
+and every multi-statement mutating use case now runs on Drizzle transactions.
+Read-only queries and single-statement writes still use the custom wrapper.
+Both coexist during the transition (`getDrizzle()` fails loudly for converted
+code, the wrapper keeps working for everything else).
 
 ## HTTP layer (`server/src/http/app.js`)
 

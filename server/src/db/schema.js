@@ -246,6 +246,35 @@ const TABLES = [
     },
   },
   {
+    name: 'payment_state_transitions',
+    columns: {
+      id: { type: 'text', pk: true },
+      payment_id: { type: 'text', notNull: true, ref: ['payments', 'id'] },
+      company_id: { type: 'text', notNull: true },
+      from_status: { type: 'text' },
+      to_status: { type: 'text', notNull: true },
+      action: { type: 'text' },
+      changed_by: { type: 'text' },
+      at: { type: 'text', notNull: true },
+    },
+  },
+  {
+    name: 'idempotency_keys',
+    columns: {
+      id: { type: 'text', pk: true },
+      company_id: { type: 'text', notNull: true },
+      key: { type: 'text', notNull: true },
+      method: { type: 'text', notNull: true },
+      route: { type: 'text', notNull: true },
+      status: { type: 'text', notNull: true, default: 'processing' },
+      response_status: { type: 'integer' },
+      response_body: { type: 'text' },
+      created_at: { type: 'text', notNull: true },
+      completed_at: { type: 'text' },
+    },
+    uniques: [{ name: 'idempotency_keys_company_key', cols: ['company_id', 'key'] }],
+  },
+  {
     name: 'recon_matches',
     columns: {
       id: { type: 'text', pk: true },
@@ -451,6 +480,7 @@ const INDEXES = [
   { name: 'idx_g2b_company_period', table: 'gstr2b_snapshots', cols: ['company_id', 'period'] },
   { name: 'idx_cd_account_date', table: 'cash_daily', cols: ['account_id', 'date'] },
   { name: 'idx_payments_company_status', table: 'payments', cols: ['company_id', 'status'] },
+  { name: 'idx_pst_payment_at', table: 'payment_state_transitions', cols: ['payment_id', 'at'] },
   { name: 'idx_audit_company_at', table: 'audit_logs', cols: ['company_id', 'at'] },
   { name: 'idx_vendors_company_active', table: 'vendors', cols: ['company_id', 'active'] },
 ];

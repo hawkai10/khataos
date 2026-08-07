@@ -9,11 +9,13 @@
 // status without inventing bank data; see PaymentGateway below.)
 // ============================================================================
 
-const { db, insert, update, run, all, get } = require('./db');
+const { insert, update, run, all, get, getDrizzle, withTransaction, T } = require('./db');
+const { eq, and, inArray, count } = require('drizzle-orm');
 const { uid, nowIso, todayStr, daysAgo, addDays, inr } = require('./util');
 const Gstn = require('./gstn');
 const Tally = require('./tally');
 const TallyMapping = require('./tally-mapping');
+const PaymentService = require('./services/payments');
 const { env, hasAll } = require('./config');
 const { Money } = require('./money');
 const { rupees } = require('./api/helpers');
@@ -33,9 +35,14 @@ class JobQueue {
     this.timers = new Map();
   }
   on(type, fn) { this.handlers.set(type, fn); }
-  async enqueue(companyId, type, payload, opts = {}) {
+  // `db` is optional: when enqueued inside a transaction (e.g. a payment
+  // creation that submits to the gateway), the job row is written atomically
+  // with the rest of the use case. The timer still fires afterwards; if the
+  // transaction rolled back, _run no-ops on the missing job row.
+  async enqueue(companyId, type, payload, opts = {}, db) {
+    const d = db || await getDrizzle();
     const id = uid('job');
-    await insert('jobs', {
+    await d.insert(T.jobs).values({
       id, company_id: companyId, type,
       payload: JSON.stringify(payload || {}),
       status: 'queued', attempts: 0,
@@ -65,6 +72,16 @@ class JobQueue {
         await run("UPDATE jobs SET status='failed', last_error=?, finished_at=? WHERE id=?", [String(err.message || err), nowIso(), id]);
       }
     }
+  }
+  // Startup recovery: the timers that fire jobs live in this process, so after
+  // a restart every queued/running row is orphaned — nothing will ever run it.
+  // Mark them failed (honest: the job did not run) so in-flight guards like
+  // PaymentGateway.createBatch stop treating them as live and payments can be
+  // re-dispatched. Called once from server boot.
+  async resetOrphaned() {
+    const d = await getDrizzle();
+    await d.update(T.jobs).set({ status: 'failed', last_error: 'server restarted — job did not run', finished_at: nowIso() })
+      .where(inArray(T.jobs.status, ['queued', 'running']));
   }
 }
 const queue = new JobQueue();
@@ -127,37 +144,59 @@ const testGateway = () => env('PAYMENT_GATEWAY') === 'test';
 const PaymentGateway = {
   name: 'razorpayx',
 
-  async createBatch(companyId, payments) {
+  async createBatch(companyId, payments, db) {
     if (!gatewayEnabled() && !testGateway()) throw notConfigured('Payment gateway (RazorpayX)');
-    for (const p of payments) {
-      const delay = p.type === 'instant' ? 600 : (p.scheduled_date && p.scheduled_date > todayStr()) ? 8000 : 2500;
-      await queue.enqueue(companyId, 'gateway.execute', { paymentId: p.id }, { delayMs: delay });
+    // Best-effort dedupe for the common sequential case: don't enqueue a
+    // second gateway job for a payment that already has one in flight (e.g.
+    // approve-then-execute). This is not the concurrency authority — the state
+    // machine's claim CAS is — but it avoids the dead duplicate job. Orphaned
+    // rows (server restart) are reset to 'failed' at boot, so they never block
+    // a legitimate re-dispatch here.
+    const inFlight = new Set();
+    const rows = await db.select({ payload: T.jobs.payload }).from(T.jobs)
+      .where(and(eq(T.jobs.type, 'gateway.execute'), inArray(T.jobs.status, ['queued', 'running'])));
+    for (const r of rows) {
+      try { inFlight.add(JSON.parse(r.payload).paymentId); } catch { /* malformed payload */ }
     }
-    return { accepted: payments.length };
+    let accepted = 0;
+    for (const p of payments) {
+      if (inFlight.has(p.id)) continue;
+      const delay = p.type === 'instant' ? 600 : (p.scheduled_date && p.scheduled_date > todayStr()) ? 8000 : 2500;
+      await queue.enqueue(companyId, 'gateway.execute', { paymentId: p.id }, { delayMs: delay }, db);
+      accepted += 1;
+    }
+    return { accepted };
   },
 
+  // Runs as one transaction: a payment must never be left half-transitioned
+  // (processing with no completion, or completed without its invoices paid).
+  // Every status move goes through the payment state machine (allowed-map
+  // validation + conditional update), so a retried job can never double-
+  // complete a payment.
   async execute(paymentId) {
-    const p = await get('SELECT * FROM payments WHERE id = ?', [paymentId]);
-    if (!p) throw new Error('payment not found');
-    await update('payments', paymentId, { status: 'processing', processed_at: nowIso() });
+    return withTransaction(async (tx) => {
+      const p = (await tx.select().from(T.payments).where(eq(T.payments.id, paymentId)).limit(1))[0];
+      if (!p) throw new Error('payment not found');
+      await PaymentService.transitionPayment(tx, p.company_id, paymentId, p.status, 'processing', { action: 'gateway.started', changedBy: 'gateway' });
 
-    if (testGateway()) {
-      // CI double: complete the payment and mark invoices paid. No UTR, no
-      // reference changes, no fabricated bank transaction.
-      await update('payments', paymentId, { status: 'completed', processed_at: nowIso() });
-      let ids = [];
-      try { ids = JSON.parse(p.invoice_ids || '[]'); } catch { ids = String(p.invoice_ids || '').split(',').map((s) => s.trim()).filter(Boolean); }
-      if (ids.length) {
-        await run(`UPDATE invoices SET status='paid', paid_at=? WHERE id IN (${ids.map(() => '?').join(',')})`, [nowIso(), ...ids]);
+      if (testGateway()) {
+        // CI double: complete the payment and mark invoices paid. No UTR, no
+        // reference changes, no fabricated bank transaction.
+        await PaymentService.transitionPayment(tx, p.company_id, paymentId, 'processing', 'completed', { action: 'gateway.completed', changedBy: 'gateway' });
+        let ids = [];
+        try { ids = JSON.parse(p.invoice_ids || '[]'); } catch { ids = String(p.invoice_ids || '').split(',').map((s) => s.trim()).filter(Boolean); }
+        if (ids.length) {
+          await tx.update(T.invoices).set({ status: 'paid', paid_at: nowIso() }).where(inArray(T.invoices.id, ids));
+        }
+        await queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'completed' }, {}, tx);
+        return { status: 'completed' };
       }
-      await queue.enqueue(p.company_id, 'tally.syncPayment', { paymentId, status: 'completed' });
-      return { status: 'completed' };
-    }
 
-    if (!gatewayEnabled()) throw notConfigured('Payment gateway (RazorpayX)');
-    // TODO(real-gateway): call the RazorpayX Payout Batch API and persist the
-    // real transaction id / UTR returned by the provider.
-    throw notConfigured('Payment gateway (RazorpayX)');
+      if (!gatewayEnabled()) throw notConfigured('Payment gateway (RazorpayX)');
+      // TODO(real-gateway): call the RazorpayX Payout Batch API and persist the
+      // real transaction id / UTR returned by the provider.
+      throw notConfigured('Payment gateway (RazorpayX)');
+    });
   },
 };
 
@@ -181,22 +220,23 @@ const TallyConnector = {
     };
   },
 
-  async heartbeat(companyId) {
-    const h = await get('SELECT * FROM tally_health WHERE company_id = ?', [companyId]);
+  async heartbeat(companyId, db) {
+    const d = db || await getDrizzle();
+    const h = (await d.select().from(T.tally_health).where(eq(T.tally_health.company_id, companyId)).limit(1))[0];
     // Uptime starts at 100% (no fabricated baseline) and converges back up
     // after any reported downtime.
     const uptime = h && h.uptime_30d != null ? h.uptime_30d : 100;
     const now = nowIso();
     if (h) {
-      await run(`UPDATE tally_health SET last_sync_at = ?, last_success_at = ?, status = 'connected', uptime_30d = ? WHERE company_id = ?`,
-        [now, now, Math.min(100, Math.round((uptime + 0.001) * 100) / 100), companyId]);
+      await d.update(T.tally_health).set({ last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: Math.min(100, Math.round((uptime + 0.001) * 100) / 100) }).where(eq(T.tally_health.company_id, companyId));
     } else {
-      await insert('tally_health', { company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 100 });
+      await d.insert(T.tally_health).values({ company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 100 });
     }
   },
 
-  async logSync(companyId, entity, entityId, action, status, error) {
-    await insert('tally_sync_logs', {
+  async logSync(companyId, entity, entityId, action, status, error, db) {
+    const d = db || await getDrizzle();
+    await d.insert(T.tally_sync_logs).values({
       id: uid('tsl'), company_id: companyId, entity, entity_id: entityId, action,
       status, error: error || null, queued_at: nowIso(),
       synced_at: status === 'synced' ? nowIso() : null,
@@ -229,12 +269,15 @@ const TallyConnector = {
 
   // Pull ledger masters from the imported Tally XML and re-run vendor
   // auto-mapping (cloud-only: "pull" = refresh from the imported masters).
+  // The count + auto-map writes + sync log + heartbeat commit atomically.
   async pullLedgers(companyId) {
-    const count = (await get('SELECT COUNT(*) AS c FROM tally_ledgers WHERE company_id = ?', [companyId])).c;
-    const mapping = await TallyMapping.autoMap(companyId);
-    await TallyConnector.logSync(companyId, 'ledger', 'vendors', 'pull', 'synced', `pulled ${count} imported ledger(s), auto-mapped ${mapping.updated.length} vendor(s)`);
-    await TallyConnector.heartbeat(companyId);
-    return { ledgers: count, mapped: mapping.updated.length };
+    return withTransaction(async (tx) => {
+      const ledgerCount = (await tx.select({ c: count() }).from(T.tally_ledgers).where(eq(T.tally_ledgers.company_id, companyId)))[0].c;
+      const mapping = await TallyMapping.autoMap(companyId, tx);
+      await TallyConnector.logSync(companyId, 'ledger', 'vendors', 'pull', 'synced', `pulled ${ledgerCount} imported ledger(s), auto-mapped ${mapping.updated.length} vendor(s)`, tx);
+      await TallyConnector.heartbeat(companyId, tx);
+      return { ledgers: ledgerCount, mapped: mapping.updated.length };
+    });
   },
 };
 
@@ -307,8 +350,9 @@ const GstDataProvider = {
 
   currentPeriod() { return todayStr().slice(0, 7); },
 
-  async fetchGstr2b(companyId, period) {
-    const company = await get('SELECT * FROM companies WHERE id = ?', [companyId]);
+  async fetchGstr2b(companyId, period, db) {
+    const d = db || await getDrizzle();
+    const company = (await d.select().from(T.companies).where(eq(T.companies.id, companyId)).limit(1))[0];
     const gstin = company.gstin;
     // Delegate to the GSP/GSTN adapter (server/src/gstn.js), which fetches
     // GSTR-2B through the configured GSP and maps the response to our row
@@ -324,7 +368,7 @@ const GstDataProvider = {
       cdnr_json: JSON.stringify(mapped.cdnr || []),
       source: mapped.source, fetched_at: mapped.fetched_at,
     };
-    await insert('gstr2b_snapshots', snapshot);
+    await d.insert(T.gstr2b_snapshots).values(snapshot);
     return snapshot;
   },
 
@@ -412,9 +456,13 @@ const GstDataProvider = {
         }
       }
     }
-    for (const mm of mismatches) {
-      await insert('gst_mismatches', { id: uid('gm'), company_id: companyId, period, invoice_no: mm.invoice_no, vendor_gstin: mm.vendor_gstin, vendor_name: mm.vendor_name, platform_amount: mm.platform_amount, gstr2b_amount: mm.gstr2b_amount, variance: mm.variance, status: 'open', note: mm.note });
-    }
+    // All mismatch rows for a scan land atomically — a failure mid-loop must
+    // not leave a partial set that the UI would treat as complete.
+    await withTransaction(async (tx) => {
+      for (const mm of mismatches) {
+        await tx.insert(T.gst_mismatches).values({ id: uid('gm'), company_id: companyId, period, invoice_no: mm.invoice_no, vendor_gstin: mm.vendor_gstin, vendor_name: mm.vendor_name, platform_amount: mm.platform_amount, gstr2b_amount: mm.gstr2b_amount, variance: mm.variance, status: 'open', note: mm.note });
+      }
+    });
     return mismatches;
   },
 
@@ -471,49 +519,56 @@ async function processEmail(mailId) {
   const tds = Money.fromPaise(ocr.tds_amount || 0);
   const gross = ocr.grand_total != null ? Money.fromPaise(ocr.grand_total) : taxable.plus(cgst).plus(sgst).plus(igst);
   // Idempotent capture: a supplier invoice forwarded twice must not create a
-  // duplicate row (company + invoice number are unique).
-  const existing = ocr.invoice_no
-    ? await get('SELECT * FROM invoices WHERE company_id = ? AND invoice_no = ?', [mail.company_id, ocr.invoice_no])
-    : null;
-  if (existing) {
-    await run(`UPDATE email_inbox SET processed = 1, invoice_id = ? WHERE id = ?`, [existing.id, mailId]);
-    return existing;
-  }
-  await insert('invoices', {
-    id: invId, company_id: mail.company_id,
-    invoice_no: ocr.invoice_no || 'MAN-' + String(Date.now()).slice(-6),
-    vendor_id: vendor ? vendor.id : null,
-    invoice_date: ocr.invoice_date || todayStr(),
-    due_date: ocr.due_date || addDays(todayStr(), 30),
-    source: 'email', status: 'captured',
-    gross_amount: Number(gross.toPaise()), taxable_amount: Number(taxable.toPaise()),
-    cgst: Number(cgst.toPaise()), sgst: Number(sgst.toPaise()), igst: Number(igst.toPaise()), cess: 0,
-    tds_amount: Number(tds.toPaise()), net_payable: Number(gross.minus(tds).toPaise()),
-    gstin_vendor: ocr.gstin,
-    hsns: JSON.stringify(ocr.hsns),
-    three_way_match: 'none',
-    ocr_json: JSON.stringify(ocr),
-    created_by: 'email-forward', created_at: nowIso(),
+  // duplicate row (company + invoice number are unique). The dedupe check and
+  // all the writes are one transaction — no partial capture, no orphan invoice.
+  const rowId = await withTransaction(async (tx) => {
+    const existing = ocr.invoice_no
+      ? (await tx.select().from(T.invoices).where(and(eq(T.invoices.company_id, mail.company_id), eq(T.invoices.invoice_no, ocr.invoice_no))).limit(1))[0] || null
+      : null;
+    if (existing) {
+      await tx.update(T.email_inbox).set({ processed: 1, invoice_id: existing.id }).where(eq(T.email_inbox.id, mailId));
+      return existing.id;
+    }
+    await tx.insert(T.invoices).values({
+      id: invId, company_id: mail.company_id,
+      invoice_no: ocr.invoice_no || 'MAN-' + String(Date.now()).slice(-6),
+      vendor_id: vendor ? vendor.id : null,
+      invoice_date: ocr.invoice_date || todayStr(),
+      due_date: ocr.due_date || addDays(todayStr(), 30),
+      source: 'email', status: 'captured',
+      gross_amount: Number(gross.toPaise()), taxable_amount: Number(taxable.toPaise()),
+      cgst: Number(cgst.toPaise()), sgst: Number(sgst.toPaise()), igst: Number(igst.toPaise()), cess: 0,
+      tds_amount: Number(tds.toPaise()), net_payable: Number(gross.minus(tds).toPaise()),
+      gstin_vendor: ocr.gstin,
+      hsns: JSON.stringify(ocr.hsns),
+      three_way_match: 'none',
+      ocr_json: JSON.stringify(ocr),
+      created_by: 'email-forward', created_at: nowIso(),
+    });
+    for (const line of ocr.hsns) {
+      await tx.insert(T.invoice_lines).values({ id: uid('l'), invoice_id: invId, hsn: line.hsn, description: line.description, qty: line.qty || 1, rate: line.rate || 0, taxable: line.taxable || 0, cgst: line.cgst || 0, sgst: line.sgst || 0, igst: 0, cess: 0 });
+    }
+    await tx.update(T.email_inbox).set({ processed: 1, invoice_id: invId }).where(eq(T.email_inbox.id, mailId));
+    await tx.update(T.invoices).set({ status: 'pending_approval' }).where(eq(T.invoices.id, invId));
+    await createApprovalChain(mail.company_id, invId, tx);
+    return invId;
   });
-  for (const line of ocr.hsns) {
-    await insert('invoice_lines', { id: uid('l'), invoice_id: invId, hsn: line.hsn, description: line.description, qty: line.qty || 1, rate: line.rate || 0, taxable: line.taxable || 0, cgst: line.cgst || 0, sgst: line.sgst || 0, igst: 0, cess: 0 });
-  }
-  await run(`UPDATE email_inbox SET processed = 1, invoice_id = ? WHERE id = ?`, [invId, mailId]);
-  await run(`UPDATE invoices SET status='pending_approval' WHERE id = ?`, [invId]);
-  await createApprovalChain(mail.company_id, invId);
-  return get('SELECT * FROM invoices WHERE id = ?', [invId]);
+  return get('SELECT * FROM invoices WHERE id = ?', [rowId]);
 }
 
 // Build the multi-level approval chain per tenant rules:
 // <= threshold -> one level (finance manager); > threshold -> level 2 CFO too.
-async function createApprovalChain(companyId, invoiceId) {
-  const inv = await get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
-  const settings = await get('SELECT settings FROM companies WHERE id = ?', [companyId]);
+// `db` is the enclosing transaction during invoice capture so the approvals are
+// written atomically with the invoice itself; otherwise the global instance.
+async function createApprovalChain(companyId, invoiceId, db) {
+  const d = db || await getDrizzle();
+  const inv = (await d.select().from(T.invoices).where(eq(T.invoices.id, invoiceId)).limit(1))[0];
+  const settings = (await d.select({ settings: T.companies.settings }).from(T.companies).where(eq(T.companies.id, companyId)).limit(1))[0];
   const cfg = JSON.parse(settings.settings || '{}');
   const threshold = Number(Money.fromRupees(cfg.cfo_approval_threshold || 100000).toPaise());
-  await insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 1, required_role: 'finance_manager', threshold_note: `<= ₹${Money.fromPaise(threshold).toRupees()} route`, status: 'pending' });
+  await d.insert(T.approvals).values({ id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 1, required_role: 'finance_manager', threshold_note: `<= ₹${Money.fromPaise(threshold).toRupees()} route`, status: 'pending' });
   if (inv.gross_amount > threshold) {
-    await insert('approvals', { id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 2, required_role: 'cfo', threshold_note: `> ₹${threshold.toLocaleString('en-IN')} requires CFO`, status: 'pending' });
+    await d.insert(T.approvals).values({ id: uid('app'), company_id: companyId, invoice_id: invoiceId, level: 2, required_role: 'cfo', threshold_note: `> ₹${threshold.toLocaleString('en-IN')} requires CFO`, status: 'pending' });
   }
 }
 

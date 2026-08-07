@@ -4,7 +4,8 @@
 // create/approve/execute/batch and the bank-vs-payment/voucher reconciliation
 // endpoints.
 
-const { all, get, insert, run, update } = require('../db');
+const { all, get, withTransaction, T } = require('../db');
+const { eq } = require('drizzle-orm');
 const { uid, nowIso, daysAgo } = require('../util');
 const { Money } = require('../money');
 const { ApiError, audit, requireRole } = require('../auth');
@@ -55,16 +56,21 @@ async function register(fastify) {
     const amounts = PaymentService.computeAmounts(invoices);
     const needsApproval = amounts.amount.gt(await PaymentService.approvalThreshold(coId));
     const type = b.type === 'instant' ? 'instant' : b.scheduled_date ? 'scheduled' : 'batch';
-    const row = await PaymentService.insertPayment(coId, {
-      vendor, invoices, mode, type,
-      status: needsApproval ? 'pending_approval' : 'approved',
-      scheduledDate: b.scheduled_date, accountId: b.account_id, user,
+    // Payment row, invoice status, gateway job and audit commit atomically — an
+    // invoice is never marked scheduled without its payment (or vice versa).
+    const row = await withTransaction(async (tx) => {
+      const pay = await PaymentService.insertPayment(tx, coId, {
+        vendor, invoices, mode, type,
+        status: needsApproval ? 'pending_approval' : 'approved',
+        scheduledDate: b.scheduled_date, accountId: b.account_id, user,
+      });
+      await PaymentService.markInvoicesScheduled(tx, coId, invoices.map((i) => i.id), b.scheduled_date);
+      if (!needsApproval) {
+        await PaymentGateway.createBatch(coId, [pay], tx);
+      }
+      await audit(coId, user, 'payment.created', 'payment', pay.id, { amount: Number(amounts.amount.toPaise()), mode, needs_approval: needsApproval }, tx);
+      return pay;
     });
-    await PaymentService.markInvoicesScheduled(coId, invoices.map((i) => i.id), b.scheduled_date);
-    if (!needsApproval) {
-      await PaymentGateway.createBatch(coId, [await get('SELECT * FROM payments WHERE id = ?', [row.id])]);
-    }
-    await audit(coId, user, 'payment.created', 'payment', row.id, { amount: Number(amounts.amount.toPaise()), mode, needs_approval: needsApproval });
     reply.ok(publicize(row, 'payments'));
   });
 
@@ -73,12 +79,18 @@ async function register(fastify) {
     const user = request.user;
     const pay = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!pay) throw new ApiError(404, 'payment not found');
-    if (pay.status !== 'pending_approval') throw new ApiError(409, 'payment is not awaiting approval');
     const threshold = await PaymentService.approvalThreshold(coId);
     if (Money.fromPaise(pay.amount).gt(threshold)) requireRole(user, ['cfo']);
-    await update('payments', request.params.id, { status: 'approved', approved_by: user.id });
-    await PaymentGateway.createBatch(coId, [pay]);
-    await audit(coId, user, 'payment.approved', 'payment', request.params.id, { amount: pay.amount });
+    await withTransaction(async (tx) => {
+      // Conditional update: only the request that finds the payment still
+      // pending_approval wins; concurrent double-approve gets a 409 and never
+      // reaches the gateway dispatch.
+      await PaymentService.transitionPayment(tx, coId, request.params.id, 'pending_approval', 'approved', {
+        action: 'payment.approved', changedBy: user.id, set: { approved_by: user.id },
+      });
+      await PaymentGateway.createBatch(coId, [pay], tx);
+      await audit(coId, user, 'payment.approved', 'payment', request.params.id, { amount: pay.amount }, tx);
+    });
     reply.ok(publicize(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]), 'payments'));
   });
 
@@ -87,10 +99,21 @@ async function register(fastify) {
     const user = request.user;
     const pay = await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!pay) throw new ApiError(404, 'payment not found');
-    if (!['approved', 'pending_approval'].includes(pay.status)) throw new ApiError(409, 'payment cannot be executed from current state');
-    await update('payments', request.params.id, { type: 'instant', status: 'approved', approved_by: user.id });
-    await PaymentGateway.createBatch(coId, [await get('SELECT * FROM payments WHERE id = ?', [request.params.id])]);
-    await audit(coId, user, 'payment.executed', 'payment', request.params.id, { mode: pay.mode });
+    await withTransaction(async (tx) => {
+      // The guard is the conditional update itself: approved -> executing is
+      // won by exactly one concurrent request (rowCount === 1). Every loser
+      // gets a 409 and never dispatches, so a double-click / retry / two users
+      // can never produce two gateway jobs. Only approved payments can be
+      // executed — a pending_approval payment must be approved first.
+      await PaymentService.transitionPayment(tx, coId, request.params.id, 'approved', 'executing', {
+        action: 'payment.executed', changedBy: user.id, set: { type: 'instant' },
+      });
+      // The transition flipped the type to instant in the DB; reflect it on the
+      // row createBatch reads so the job gets the instant dispatch delay.
+      pay.type = 'instant';
+      await PaymentGateway.createBatch(coId, [pay], tx);
+      await audit(coId, user, 'payment.executed', 'payment', request.params.id, { mode: pay.mode }, tx);
+    });
     reply.ok(publicize(await get('SELECT * FROM payments WHERE id = ?', [request.params.id]), 'payments'));
   });
 
@@ -99,23 +122,32 @@ async function register(fastify) {
     const user = request.user;
     const items = (request.body || {}).items || [];
     if (!items.length) throw new ApiError(400, 'items required');
-    const created = [];
+    // Vendor/invoice references are resolved BEFORE the transaction (plain
+    // reads — they must not run inside the write tx, which would hang
+    // single-connection engines). The whole batch is then one atomic unit: all
+    // payments + invoice statuses + gateway jobs + audit commit together.
+    const resolved = [];
     for (const item of items) {
       const vendor = await get('SELECT * FROM vendors WHERE id = ? AND company_id = ?', [item.vendor_id, coId]);
       if (!vendor) continue;
       const invoices = (await Promise.all((item.invoice_ids || []).map((id) => get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [id, coId])))).filter(Boolean);
       if (!invoices.length) continue;
-      const row = await PaymentService.insertPayment(coId, {
-        vendor, invoices, mode: item.mode || 'NEFT', type: 'batch', status: 'approved',
-        scheduledDate: item.scheduled_date, accountId: item.account_id, user,
-      });
-      await PaymentService.markInvoicesScheduled(coId, invoices.map((i) => i.id), item.scheduled_date);
-      created.push(row.id);
+      resolved.push({ vendor, invoices, mode: item.mode || 'NEFT', scheduledDate: item.scheduled_date, accountId: item.account_id });
     }
-    const rows = await all(`SELECT * FROM payments WHERE id IN (${created.map(() => '?').join(',')})`, created);
-    await PaymentGateway.createBatch(coId, rows);
-    await audit(coId, user, 'payment.batch_created', 'payment', null, { count: created.length });
-    reply.ok(publicizeRows(rows, 'payments'));
+    const created = [];
+    await withTransaction(async (tx) => {
+      for (const r of resolved) {
+        const row = await PaymentService.insertPayment(tx, coId, {
+          vendor: r.vendor, invoices: r.invoices, mode: r.mode, type: 'batch', status: 'approved',
+          scheduledDate: r.scheduledDate, accountId: r.accountId, user,
+        });
+        await PaymentService.markInvoicesScheduled(tx, coId, r.invoices.map((i) => i.id), r.scheduledDate);
+        created.push(row);
+      }
+      await PaymentGateway.createBatch(coId, created, tx);
+      await audit(coId, user, 'payment.batch_created', 'payment', null, { count: created.length }, tx);
+    });
+    reply.ok(publicizeRows(created, 'payments'));
   });
 
   // ===================== RECONCILIATION =====================
@@ -165,8 +197,10 @@ async function register(fastify) {
     const txn = await get('SELECT * FROM bank_transactions WHERE id = ? AND company_id = ?', [b.bank_txn_id, coId]);
     if (!txn) throw new ApiError(404, 'transaction not found');
     const payment = b.payment_id ? await get('SELECT * FROM payments WHERE id = ? AND company_id = ?', [b.payment_id, coId]) : null;
-    await recon.markMatched(txn.id, payment ? payment.id : null, 'manual', 1, user.id);
-    await audit(coId, user, 'recon.manual_match', 'bank_transaction', txn.id, { payment_id: payment ? payment.id : null });
+    await withTransaction(async (tx) => {
+      await recon.markMatched(txn.id, payment ? payment.id : null, 'manual', 1, user.id, tx);
+      await audit(coId, user, 'recon.manual_match', 'bank_transaction', txn.id, { payment_id: payment ? payment.id : null }, tx);
+    });
     reply.ok({ matched: true });
   });
 
@@ -177,14 +211,16 @@ async function register(fastify) {
     const txn = await get('SELECT * FROM bank_transactions WHERE id = ? AND company_id = ?', [request.params.id, coId]);
     if (!txn) throw new ApiError(404, 'transaction not found');
     const vno = 'PV-MAN-' + String(Date.now()).slice(-6);
-    await insert('recon_matches', {
-      id: uid('rm'), company_id: coId, bank_txn_id: txn.id, payment_id: null,
-      tally_voucher_no: vno, match_type: 'manual', confidence: 1, status: 'matched',
-      matched_by: user.id, matched_at: nowIso(), notes: 'voucher created from unmatched transaction',
+    await withTransaction(async (tx) => {
+      await tx.insert(T.recon_matches).values({
+        id: uid('rm'), company_id: coId, bank_txn_id: txn.id, payment_id: null,
+        tally_voucher_no: vno, match_type: 'manual', confidence: 1, status: 'matched',
+        matched_by: user.id, matched_at: nowIso(), notes: 'voucher created from unmatched transaction',
+      });
+      await tx.update(T.bank_transactions).set({ matched: 1 }).where(eq(T.bank_transactions.id, txn.id));
+      await TallyConnector.logSync(coId, 'voucher', vno, 'create', 'synced', null, tx);
+      await audit(coId, user, 'recon.voucher_created', 'bank_transaction', txn.id, { voucher: vno }, tx);
     });
-    await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [txn.id]);
-    await TallyConnector.logSync(coId, 'voucher', vno, 'create', 'synced');
-    await audit(coId, user, 'recon.voucher_created', 'bank_transaction', txn.id, { voucher: vno });
     reply.ok({ voucher_no: vno });
   });
 }

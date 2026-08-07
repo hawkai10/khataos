@@ -147,7 +147,7 @@ const UI = {
       captured: ['Captured', 'neutral'], validation_failed: ['Validation failed', 'danger'],
       pending_approval: ['Pending approval', 'warn'], approved: ['Approved', 'info'],
       rejected: ['Rejected', 'danger'], paid: ['Paid', 'ok'], scheduled: ['Scheduled', 'info'],
-      draft: ['Draft', 'neutral'], pending: ['Pending', 'warn'], processing: ['Processing', 'warn'],
+      draft: ['Draft', 'neutral'], pending: ['Pending', 'warn'], processing: ['Processing', 'warn'], executing: ['Executing', 'warn'],
       completed: ['Completed', 'ok'], failed: ['Failed', 'danger'], pending_approval_pay: ['Awaiting approval', 'warn'],
       matched: ['Matched', 'ok'], mismatch: ['Mismatch', 'danger'], pending_m: ['Pending', 'warn'],
       none: ['No match', 'neutral'], connected: ['Connected', 'ok'], degraded: ['Degraded', 'warn'],

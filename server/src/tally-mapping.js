@@ -8,7 +8,8 @@
 // so invoices and payments automatically tag the correct Tally ledger.
 // Ambiguous or weak matches are left for manual review in the UI.
 
-const { all, get, update } = require('./db');
+const { all, get, withTransaction, T } = require('./db');
+const { eq, and } = require('drizzle-orm');
 
 const STOP_TOKENS = new Set(['and', 'co', 'pvt', 'ltd', 'llp', 'private', 'limited', 'the', 'of', '&']);
 const GROUP_PREFIXES = ['sundrycreditors', 'sundrydebtors'];
@@ -66,8 +67,11 @@ function matchTier(vendor, ledger) {
   return 'fuzzy';
 }
 
-async function bestMatch(vendor, companyId) {
-  const ledgers = await all('SELECT name, group_name, gstin FROM tally_ledgers WHERE company_id = ?', [companyId]);
+// Pure ranking of a vendor against an already-fetched ledger list. Callers
+// pass the ledgers so the fetch and the decision stay on the same DB handle
+// (report reads via the wrapper; autoMap reads via its transaction — a wrapper
+// read inside an open Drizzle tx would hang single-connection engines).
+function rankMatch(vendor, ledgers) {
   const gstinHits = [];
   const exactHits = [];
   const fuzzy = [];
@@ -87,6 +91,11 @@ async function bestMatch(vendor, companyId) {
   if (!best) return { ledger: null, tier: 'fuzzy', score: 0, ties: 0 };
   const ties = fuzzy.filter((f) => f.score === best.score).length;
   return { ledger: ties === 1 ? best.ledger : null, tier: 'fuzzy', score: best.score, ties };
+}
+
+async function bestMatch(vendor, companyId) {
+  const ledgers = await all('SELECT name, group_name, gstin FROM tally_ledgers WHERE company_id = ?', [companyId]);
+  return rankMatch(vendor, ledgers);
 }
 
 async function report(companyId) {
@@ -133,30 +142,46 @@ async function report(companyId) {
 
 // Apply auto-mapping: update vendor.ledger_name only for unambiguous GSTIN
 // or exact-name matches. Fuzzy matches always stay in the review queue.
-async function autoMap(companyId) {
-  const vendors = await all('SELECT id, name, gstin, ledger_name FROM vendors WHERE company_id = ? AND active = 1', [companyId]);
+// All updates in a run commit atomically. `db` is the enclosing transaction
+// when called from TallyConnector.pullLedgers; otherwise it opens its own.
+// The ledger lookup runs on the same handle as the updates — never a wrapper
+// read inside the open transaction (hangs single-connection engines).
+async function autoMap(companyId, db) {
   const updated = [];
-  for (const vendor of vendors) {
-    const m = await bestMatch(vendor, companyId);
-    if ((m.tier === 'gstin' || m.tier === 'exact') && m.ties === 1 && m.ledger && vendor.ledger_name !== m.ledger.name) {
-      const from = vendor.ledger_name;
-      await update('vendors', vendor.id, { ledger_name: m.ledger.name });
-      updated.push({ vendor_id: vendor.id, from, to: m.ledger.name, tier: m.tier });
+  const body = async (d) => {
+    // Vendors + ledgers both read on the same handle as the updates — when
+    // autoMap runs inside another transaction (pullLedgers) the wrapper is not
+    // involved at all, which is required on single-connection engines.
+    const vendors = await d.select({ id: T.vendors.id, name: T.vendors.name, gstin: T.vendors.gstin, ledger_name: T.vendors.ledger_name }).from(T.vendors).where(and(eq(T.vendors.company_id, companyId), eq(T.vendors.active, 1)));
+    const ledgers = await d.select({ name: T.tally_ledgers.name, group_name: T.tally_ledgers.group_name, gstin: T.tally_ledgers.gstin }).from(T.tally_ledgers).where(eq(T.tally_ledgers.company_id, companyId));
+    for (const vendor of vendors) {
+      const m = rankMatch(vendor, ledgers);
+      if ((m.tier === 'gstin' || m.tier === 'exact') && m.ties === 1 && m.ledger && vendor.ledger_name !== m.ledger.name) {
+        const from = vendor.ledger_name;
+        await d.update(T.vendors).set({ ledger_name: m.ledger.name }).where(eq(T.vendors.id, vendor.id));
+        updated.push({ vendor_id: vendor.id, from, to: m.ledger.name, tier: m.tier });
+      }
     }
-  }
-  return { updated };
+    return { updated };
+  };
+  if (db) return body(db);
+  return withTransaction((tx) => body(tx));
 }
 
-async function setMapping(companyId, vendorId, ledgerName) {
-  const vendor = await get('SELECT id, name FROM vendors WHERE id = ? AND company_id = ?', [vendorId, companyId]);
-  if (!vendor) throw new Error('vendor not found');
-  const name = String(ledgerName || '').trim();
-  if (name) {
-    const ledger = await get('SELECT name FROM tally_ledgers WHERE company_id = ? AND name = ?', [companyId, name]);
-    if (!ledger) throw new Error(`Tally ledger "${name}" is not in this company's import`);
-  }
-  await update('vendors', vendorId, { ledger_name: name || vendor.name });
-  return { vendor_id: vendorId, ledger_name: name || vendor.name };
+async function setMapping(companyId, vendorId, ledgerName, db) {
+  const body = async (d) => {
+    const vendor = (await d.select({ id: T.vendors.id, name: T.vendors.name }).from(T.vendors).where(and(eq(T.vendors.id, vendorId), eq(T.vendors.company_id, companyId))).limit(1))[0];
+    if (!vendor) throw new Error('vendor not found');
+    const name = String(ledgerName || '').trim();
+    if (name) {
+      const ledger = (await d.select({ name: T.tally_ledgers.name }).from(T.tally_ledgers).where(and(eq(T.tally_ledgers.company_id, companyId), eq(T.tally_ledgers.name, name))).limit(1))[0];
+      if (!ledger) throw new Error(`Tally ledger "${name}" is not in this company's import`);
+    }
+    await d.update(T.vendors).set({ ledger_name: name || vendor.name }).where(eq(T.vendors.id, vendorId));
+    return { vendor_id: vendorId, ledger_name: name || vendor.name };
+  };
+  if (db) return body(db);
+  return withTransaction((tx) => body(tx));
 }
 
-module.exports = { report, autoMap, setMapping, scoreMatch, matchTier, _internals: { normalize, tokens, coreName } };
+module.exports = { report, autoMap, setMapping, scoreMatch, matchTier, rankMatch, _internals: { normalize, tokens, coreName } };

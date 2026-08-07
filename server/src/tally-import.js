@@ -14,7 +14,7 @@
 //               company, preserving the accounting structure.
 // ============================================================================
 
-const { getDrizzle, DB_ENGINE } = require('./db');
+const { getDrizzle, DB_ENGINE, withTransaction } = require('./db');
 const { sqlite, pg } = require('./db/schema');
 const { eq } = require('drizzle-orm');
 const { uid, nowIso, formatINR } = require('./util');
@@ -154,9 +154,9 @@ async function validateExport(companyId, data) {
 
 // Upsert one record type by Tally GUID + ALTERID, falling back to the
 // name / number+date key for exports without GUIDs. Returns nothing; mutates
-// the summary counters. opts: { table, idPrefix, keyOf, fields }.
-async function upsertRecords(type, incomingRows, rows, companyId, summary, opts) {
-  const d = await getDrizzle();
+// the summary counters. opts: { table, idPrefix, keyOf, fields }. `db` is the
+// enclosing import transaction so all three passes commit atomically.
+async function upsertRecords(db, type, incomingRows, rows, companyId, summary, opts) {
   const { table, idPrefix, keyOf, fields } = opts;
   const byGuid = new Map();
   const byName = new Map();
@@ -174,7 +174,7 @@ async function upsertRecords(type, incomingRows, rows, companyId, summary, opts)
     const guidRow = inc.tally_guid ? byGuid.get(inc.tally_guid) : null;
     if (guidRow) {
       if (alter > (Number(guidRow.tally_alterid) || 0)) {
-        await d.update(table).set({ ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter }).where(eq(table.id, guidRow.id));
+        await db.update(table).set({ ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter }).where(eq(table.id, guidRow.id));
         byGuid.set(inc.tally_guid, { id: guidRow.id, tally_alterid: alter });
         byName.set(keyOf(inc), { id: guidRow.id, tally_alterid: alter });
         summary[type].updated++;
@@ -192,12 +192,12 @@ async function upsertRecords(type, incomingRows, rows, companyId, summary, opts)
     const row = byName.get(key);
     if (!row) {
       const id = uid(idPrefix);
-      await d.insert(table).values({ id, company_id: companyId, ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
+      await db.insert(table).values({ id, company_id: companyId, ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter });
       if (inc.tally_guid) byGuid.set(inc.tally_guid, { id, tally_alterid: alter });
       byName.set(key, { id, tally_alterid: alter });
       summary[type].imported++;
     } else if (alter > (Number(row.tally_alterid) || 0)) {
-      await d.update(table).set({ ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter }).where(eq(table.id, row.id));
+      await db.update(table).set({ ...fields(inc), tally_guid: inc.tally_guid || null, tally_alterid: alter }).where(eq(table.id, row.id));
       if (inc.tally_guid) byGuid.set(inc.tally_guid, { id: row.id, tally_alterid: alter });
       byName.set(key, { id: row.id, tally_alterid: alter });
       summary[type].updated++;
@@ -210,71 +210,75 @@ async function upsertRecords(type, incomingRows, rows, companyId, summary, opts)
 // Sequenced import: Groups -> Ledgers -> Vouchers, upserted by GUID/ALTERID.
 // Records rejected by validation (e.g. unbalanced vouchers) are skipped and
 // counted, never partially written.
+// The whole import is ONE transaction: a failure at any pass (e.g. a duplicate
+// tally_guid violating a unique index) rolls back every group/ledger/voucher
+// written so far — no half-imported export with dangling ledger references.
 async function importExport(companyId, data, rejectedVouchers = new Set()) {
-  const d = await getDrizzle();
-  const auto = planAutoLedgers(data);
-  const allGroups = [...data.groups];
-  for (const a of auto) {
-    if (!allGroups.some((g) => g.name === a.group)) allGroups.push({ name: a.group, parent: null });
-  }
-  const summary = {
-    groups: { total: allGroups.length, imported: 0, updated: 0, skipped: 0 },
-    ledgers: { total: data.ledgers.length + auto.length, imported: 0, updated: 0, skipped: 0 },
-    vouchers: { total: data.vouchers.length, imported: 0, updated: 0, skipped: 0 },
-  };
-
-  const existingGroupRows = await d.select({ id: T.tally_groups.id, name: T.tally_groups.name, tally_guid: T.tally_groups.tally_guid, tally_alterid: T.tally_groups.tally_alterid }).from(T.tally_groups).where(eq(T.tally_groups.company_id, companyId));
-  const existingLedgerRows = await d.select({ id: T.tally_ledgers.id, name: T.tally_ledgers.name, tally_guid: T.tally_ledgers.tally_guid, tally_alterid: T.tally_ledgers.tally_alterid }).from(T.tally_ledgers).where(eq(T.tally_ledgers.company_id, companyId));
-  const existingVoucherRows = await d.select({ id: T.tally_vouchers.id, voucher_number: T.tally_vouchers.voucher_number, date: T.tally_vouchers.date, voucher_type: T.tally_vouchers.voucher_type, tally_guid: T.tally_vouchers.tally_guid, tally_alterid: T.tally_vouchers.tally_alterid }).from(T.tally_vouchers).where(eq(T.tally_vouchers.company_id, companyId));
-
-  await upsertRecords('groups', allGroups, existingGroupRows, companyId, summary, {
-    table: T.tally_groups, idPrefix: 'tg', keyOf: (g) => g.name,
-    fields: (g) => ({ name: g.name, parent: g.parent || null }),
-  });
-
-  const knownGroups = new Set([...existingGroupRows.map((r) => r.name), ...allGroups.map((g) => g.name)]);
-  const dataLedgers = [];
-  for (const l of data.ledgers) {
-    if (l.group_name && !knownGroups.has(l.group_name)) { summary.ledgers.skipped++; continue; }
-    dataLedgers.push(l);
-  }
-  const ledgerRows = [...dataLedgers, ...auto.map((a) => ({ name: a.name, group_name: a.group, opening_balance: 0, gstin: null }))];
-  await upsertRecords('ledgers', ledgerRows, existingLedgerRows, companyId, summary, {
-    table: T.tally_ledgers, idPrefix: 'tl', keyOf: (l) => l.name,
-    fields: (l) => ({
-      name: l.name, group_name: l.group_name || null,
-      opening_balance: Number.isFinite(l.opening_balance) ? l.opening_balance : 0,
-      gstin: l.gstin || null,
-    }),
-  });
-
-  const knownLedgers = new Set([...existingLedgerRows.map((r) => r.name), ...ledgerRows.map((l) => l.name)]);
-  const voucherRows = [];
-  for (const v of data.vouchers) {
-    if (rejectedVouchers.has(v.voucher_number) || !v.voucher_number || !v.date || !Number.isFinite(v.amount) || (v.party_name && !knownLedgers.has(v.party_name))) {
-      summary.vouchers.skipped++;
-      continue;
+  return withTransaction(async (tx) => {
+    const auto = planAutoLedgers(data);
+    const allGroups = [...data.groups];
+    for (const a of auto) {
+      if (!allGroups.some((g) => g.name === a.group)) allGroups.push({ name: a.group, parent: null });
     }
-    voucherRows.push(v);
-  }
-  await upsertRecords('vouchers', voucherRows, existingVoucherRows, companyId, summary, {
-    table: T.tally_vouchers, idPrefix: 'tv',
-    // Fallback identity includes voucher_type so a Payment "001" and Receipt
-    // "001" on the same date (common with manual/loose numbering) never
-    // collide on number|date alone.
-    keyOf: (v) => `${v.voucher_number}|${v.date}|${v.voucher_type}`,
-    fields: (v) => ({
-      voucher_number: v.voucher_number,
-      voucher_type: v.voucher_type,
-      date: v.date,
-      amount: v.amount,
-      party_name: v.party_name,
-      entry_json: JSON.stringify(v.entries),
-      cancelled: v.cancelled ? 1 : 0,
-      imported_at: nowIso(),
-    }),
+    const summary = {
+      groups: { total: allGroups.length, imported: 0, updated: 0, skipped: 0 },
+      ledgers: { total: data.ledgers.length + auto.length, imported: 0, updated: 0, skipped: 0 },
+      vouchers: { total: data.vouchers.length, imported: 0, updated: 0, skipped: 0 },
+    };
+
+    const existingGroupRows = await tx.select({ id: T.tally_groups.id, name: T.tally_groups.name, tally_guid: T.tally_groups.tally_guid, tally_alterid: T.tally_groups.tally_alterid }).from(T.tally_groups).where(eq(T.tally_groups.company_id, companyId));
+    const existingLedgerRows = await tx.select({ id: T.tally_ledgers.id, name: T.tally_ledgers.name, tally_guid: T.tally_ledgers.tally_guid, tally_alterid: T.tally_ledgers.tally_alterid }).from(T.tally_ledgers).where(eq(T.tally_ledgers.company_id, companyId));
+    const existingVoucherRows = await tx.select({ id: T.tally_vouchers.id, voucher_number: T.tally_vouchers.voucher_number, date: T.tally_vouchers.date, voucher_type: T.tally_vouchers.voucher_type, tally_guid: T.tally_vouchers.tally_guid, tally_alterid: T.tally_vouchers.tally_alterid }).from(T.tally_vouchers).where(eq(T.tally_vouchers.company_id, companyId));
+
+    await upsertRecords(tx, 'groups', allGroups, existingGroupRows, companyId, summary, {
+      table: T.tally_groups, idPrefix: 'tg', keyOf: (g) => g.name,
+      fields: (g) => ({ name: g.name, parent: g.parent || null }),
+    });
+
+    const knownGroups = new Set([...existingGroupRows.map((r) => r.name), ...allGroups.map((g) => g.name)]);
+    const dataLedgers = [];
+    for (const l of data.ledgers) {
+      if (l.group_name && !knownGroups.has(l.group_name)) { summary.ledgers.skipped++; continue; }
+      dataLedgers.push(l);
+    }
+    const ledgerRows = [...dataLedgers, ...auto.map((a) => ({ name: a.name, group_name: a.group, opening_balance: 0, gstin: null }))];
+    await upsertRecords(tx, 'ledgers', ledgerRows, existingLedgerRows, companyId, summary, {
+      table: T.tally_ledgers, idPrefix: 'tl', keyOf: (l) => l.name,
+      fields: (l) => ({
+        name: l.name, group_name: l.group_name || null,
+        opening_balance: Number.isFinite(l.opening_balance) ? l.opening_balance : 0,
+        gstin: l.gstin || null,
+      }),
+    });
+
+    const knownLedgers = new Set([...existingLedgerRows.map((r) => r.name), ...ledgerRows.map((l) => l.name)]);
+    const voucherRows = [];
+    for (const v of data.vouchers) {
+      if (rejectedVouchers.has(v.voucher_number) || !v.voucher_number || !v.date || !Number.isFinite(v.amount) || (v.party_name && !knownLedgers.has(v.party_name))) {
+        summary.vouchers.skipped++;
+        continue;
+      }
+      voucherRows.push(v);
+    }
+    await upsertRecords(tx, 'vouchers', voucherRows, existingVoucherRows, companyId, summary, {
+      table: T.tally_vouchers, idPrefix: 'tv',
+      // Fallback identity includes voucher_type so a Payment "001" and Receipt
+      // "001" on the same date (common with manual/loose numbering) never
+      // collide on number|date alone.
+      keyOf: (v) => `${v.voucher_number}|${v.date}|${v.voucher_type}`,
+      fields: (v) => ({
+        voucher_number: v.voucher_number,
+        voucher_type: v.voucher_type,
+        date: v.date,
+        amount: v.amount,
+        party_name: v.party_name,
+        entry_json: JSON.stringify(v.entries),
+        cancelled: v.cancelled ? 1 : 0,
+        imported_at: nowIso(),
+      }),
+    });
+    return summary;
   });
-  return summary;
 }
 
 async function handleImport(companyId, xml) {

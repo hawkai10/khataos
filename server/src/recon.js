@@ -7,7 +7,8 @@
 // charge rule (RECON_BANK_FEE_TOLERANCE_PAISE); everything else must match to
 // the paisa. Target: >= 70% automatic matching.
 
-const { all, get, insert, run } = require('./db');
+const { all, get, withTransaction, T } = require('./db');
+const { eq, and, lt } = require('drizzle-orm');
 const { uid, nowIso, diffDays, round2, daysAgo } = require('./util');
 const { Money } = require('./money');
 const { formatINR } = require('./util');
@@ -142,40 +143,55 @@ function localHash(str) {
 }
 
 // New bank activity arrives unmatched; match it against real imported Tally
-// vouchers (bill-ref first, then amount+date+party).
+// vouchers (bill-ref first, then amount+date+party). The whole pass commits
+// atomically so a failure can't leave a half-applied matching run.
 async function autoVoucherMatch(companyId, days = 7) {
   const since = new Date(Date.now() - (days - 1) * 86400000).toISOString().slice(0, 10);
   const txns = await all(`SELECT * FROM bank_transactions WHERE company_id = ? AND matched = 0 AND status = 'posted' AND txn_date >= ?`, [companyId, since]);
   const tallyIndex = await loadTallyIndex(companyId);
   let matched = 0;
-  for (const t of txns) {
-    const tv = findTallyMatch(t, tallyIndex);
-    if (!tv || !tv.match) continue;
-    const mt = tv.match;
-    await insert('recon_matches', {
-      id: uid('rm'), company_id: companyId, bank_txn_id: t.id, payment_id: null,
-      tally_voucher_no: mt.voucher.voucher_number, match_type: mt.type, confidence: mt.confidence,
-      status: 'matched', matched_by: 'auto', matched_at: nowIso(),
-      notes: mt.ref ? `Matched against Tally voucher #${mt.voucher.voucher_number} (${mt.ref})` : `Matched against Tally voucher #${mt.voucher.voucher_number}`,
-    });
-    await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [t.id]);
-    matched++;
-  }
+  await withTransaction(async (tx) => {
+    for (const t of txns) {
+      const tv = findTallyMatch(t, tallyIndex);
+      if (!tv || !tv.match) continue;
+      const mt = tv.match;
+      await tx.insert(T.recon_matches).values({
+        id: uid('rm'), company_id: companyId, bank_txn_id: t.id, payment_id: null,
+        tally_voucher_no: mt.voucher.voucher_number, match_type: mt.type, confidence: mt.confidence,
+        status: 'matched', matched_by: 'auto', matched_at: nowIso(),
+        notes: mt.ref ? `Matched against Tally voucher #${mt.voucher.voucher_number} (${mt.ref})` : `Matched against Tally voucher #${mt.voucher.voucher_number}`,
+      });
+      await tx.update(T.bank_transactions).set({ matched: 1 }).where(eq(T.bank_transactions.id, t.id));
+      matched++;
+    }
+  });
   return matched;
 }
 
-async function markMatched(bankTxnId, paymentId, type, confidence, by) {
-  const txn = await get('SELECT company_id FROM bank_transactions WHERE id = ?', [bankTxnId]);
-  await insert('recon_matches', {
-    id: uid('rm'), company_id: txn.company_id,
-    bank_txn_id: bankTxnId, payment_id: paymentId || null,
-    match_type: type, confidence, status: 'matched', matched_by: by,
-    matched_at: nowIso(),
-  });
-  await run('UPDATE bank_transactions SET matched = 1, matched_id = ? WHERE id = ?', [paymentId || '', bankTxnId]);
+// Write one match atomically: the recon_matches row and the bank_transaction's
+// matched flag must land together. `db` is the enclosing transaction when this
+// is called inside a reconciliation run; otherwise it opens its own.
+async function markMatched(bankTxnId, paymentId, type, confidence, by, db) {
+  const body = async (d) => {
+    const txn = (await d.select({ company_id: T.bank_transactions.company_id }).from(T.bank_transactions).where(eq(T.bank_transactions.id, bankTxnId)).limit(1))[0];
+    await d.insert(T.recon_matches).values({
+      id: uid('rm'), company_id: txn.company_id,
+      bank_txn_id: bankTxnId, payment_id: paymentId || null,
+      match_type: type, confidence, status: 'matched', matched_by: by,
+      matched_at: nowIso(),
+    });
+    await d.update(T.bank_transactions).set({ matched: 1, matched_id: paymentId || '' }).where(eq(T.bank_transactions.id, bankTxnId));
+  };
+  if (db) return body(db);
+  return withTransaction((tx) => body(tx));
 }
 
 // Run the full matching pass. Returns stats.
+// The whole pass commits atomically — a failure mid-run rolls back every match
+// written so far instead of leaving a partially-applied reconciliation. The
+// source reads (candidates/payments/vouchers/tallyIndex) run before the
+// transaction; the unmatched re-read runs on the tx so it sees the matches the
+// main loop just wrote.
 async function matchAll(companyId) {
   const candidates = await all(`
     SELECT * FROM bank_transactions
@@ -193,80 +209,84 @@ async function matchAll(companyId) {
   const tallyIndex = await loadTallyIndex(companyId);
 
   let auto = 0, total = 0;
-  for (const txn of candidates) {
-    total += 1;
-    const isDebit = txn.amount < 0;
-    if (isDebit) {
-      // 1) exact reference match
-      let hit = payments.find(p => (p.reference && p.reference === txn.ref_no) && amountEquals(txn.amount, -p.net_amount));
-      if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.99, 'auto'); auto++; continue; }
+  await withTransaction(async (tx) => {
+    for (const txn of candidates) {
+      total += 1;
+      const isDebit = txn.amount < 0;
+      if (isDebit) {
+        // 1) exact reference match
+        let hit = payments.find(p => (p.reference && p.reference === txn.ref_no) && amountEquals(txn.amount, -p.net_amount));
+        if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.99, 'auto', tx); auto++; continue; }
 
-      // 2) exact amount + date window
-      hit = payments.find(p => amountEquals(txn.amount, -p.net_amount) && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 3);
-      if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.93, 'auto'); auto++; continue; }
-    }
+        // 2) exact amount + date window
+        hit = payments.find(p => amountEquals(txn.amount, -p.net_amount) && Math.abs(diffDays(p.processed_at ? p.processed_at.slice(0, 10) : p.scheduled_date, txn.txn_date)) <= 3);
+        if (hit) { await markMatched(txn.id, hit.id, 'exact', 0.93, 'auto', tx); auto++; continue; }
+      }
 
-    // 4) real Tally voucher match (imported XML): bill-ref first, then
-    //    amount + date + party. A bill-ref with a different amount is
-    //    recorded as a mismatch, never silently force-matched. Applies to
-    //    debits AND credits (receipts, refunds on Debit Notes, etc.), so
-    //    /api/recon/run reconciles both directions.
-    const tv = findTallyMatch(txn, tallyIndex);
-    if (tv && tv.mismatch) {
-      const m = tv.mismatch;
-      await insert('recon_matches', {
-        id: uid('rm'), company_id: companyId, bank_txn_id: txn.id, payment_id: null,
-        tally_voucher_no: m.voucher.voucher_number, match_type: 'billref', confidence: 0.5,
-        status: 'mismatch', matched_by: 'auto', matched_at: nowIso(),
-        notes: `Tally voucher #${m.voucher.voucher_number} references ${m.ref} but amount differs (bank ${formatINR(m.expected)} vs voucher ${formatINR(m.actual)})`,
-      });
-      continue;
-    }
-    if (tv && tv.match) {
-      const mt = tv.match;
-      await insert('recon_matches', {
-        id: uid('rm'), company_id: companyId, bank_txn_id: txn.id, payment_id: null,
-        tally_voucher_no: mt.voucher.voucher_number, match_type: mt.type, confidence: mt.confidence,
-        status: 'matched', matched_by: 'auto', matched_at: nowIso(),
-        notes: mt.ref ? `Matched against Tally voucher #${mt.voucher.voucher_number} (${mt.ref})` : `Matched against Tally voucher #${mt.voucher.voucher_number}`,
-      });
-      await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [txn.id]);
-      auto++; continue;
-    }
-
-    if (isDebit) {
-      // 5) KhataOS invoice fallback (approved invoice, no payment, no Tally
-      //    voucher imported yet). Labeled as KhataOS-side, not authoritative.
-      const hit = vouchers.find(v => amountEquals(txn.amount, -v.net_payable) && Math.abs(diffDays(v.invoice_date, txn.txn_date)) <= 4);
-      if (hit) {
-        await insert('recon_matches', {
-          id: uid('rm'), company_id: companyId, bank_txn_id: txn.id,
-          payment_id: null, tally_voucher_no: null,
-          match_type: 'fuzzy', confidence: 0.66, status: 'matched', matched_by: 'auto',
-          matched_at: nowIso(), notes: `Matched against KhataOS invoice ${hit.invoice_no} (no Tally voucher imported)`,
+      // 4) real Tally voucher match (imported XML): bill-ref first, then
+      //    amount + date + party. A bill-ref with a different amount is
+      //    recorded as a mismatch, never silently force-matched. Applies to
+      //    debits AND credits (receipts, refunds on Debit Notes, etc.), so
+      //    /api/recon/run reconciles both directions.
+      const tv = findTallyMatch(txn, tallyIndex);
+      if (tv && tv.mismatch) {
+        const m = tv.mismatch;
+        await tx.insert(T.recon_matches).values({
+          id: uid('rm'), company_id: companyId, bank_txn_id: txn.id, payment_id: null,
+          tally_voucher_no: m.voucher.voucher_number, match_type: 'billref', confidence: 0.5,
+          status: 'mismatch', matched_by: 'auto', matched_at: nowIso(),
+          notes: `Tally voucher #${m.voucher.voucher_number} references ${m.ref} but amount differs (bank ${formatINR(m.expected)} vs voucher ${formatINR(m.actual)})`,
         });
-        await run('UPDATE bank_transactions SET matched = 1 WHERE id = ?', [txn.id]);
+        continue;
+      }
+      if (tv && tv.match) {
+        const mt = tv.match;
+        await tx.insert(T.recon_matches).values({
+          id: uid('rm'), company_id: companyId, bank_txn_id: txn.id, payment_id: null,
+          tally_voucher_no: mt.voucher.voucher_number, match_type: mt.type, confidence: mt.confidence,
+          status: 'matched', matched_by: 'auto', matched_at: nowIso(),
+          notes: mt.ref ? `Matched against Tally voucher #${mt.voucher.voucher_number} (${mt.ref})` : `Matched against Tally voucher #${mt.voucher.voucher_number}`,
+        });
+        await tx.update(T.bank_transactions).set({ matched: 1 }).where(eq(T.bank_transactions.id, txn.id));
         auto++; continue;
       }
-    }
-  }
 
-  // Combined matches: two small debits within 2 days summing to a payment.
-  const unmatched = await all(`SELECT * FROM bank_transactions WHERE company_id = ? AND matched = 0 AND status = 'posted' AND amount < 0 ORDER BY txn_date`, [companyId]);
-  for (let i = 0; i < unmatched.length; i++) {
-    for (let j = i + 1; j < unmatched.length; j++) {
-      const a = unmatched[i], b = unmatched[j];
-      if (Math.abs(diffDays(a.txn_date, b.txn_date)) > 2) continue;
-      const sum = Money.fromPaise(a.amount).plus(Money.fromPaise(b.amount));
-      const hit = payments.find(p => sum.equals(Money.fromPaise(p.net_amount).negate()));
-      if (hit) {
-        await markMatched(a.id, hit.id, 'combined', 0.55, 'auto');
-        await markMatched(b.id, hit.id, 'combined', 0.55, 'auto');
-        auto += 2; total += 1;
-        break;
+      if (isDebit) {
+        // 5) KhataOS invoice fallback (approved invoice, no payment, no Tally
+        //    voucher imported yet). Labeled as KhataOS-side, not authoritative.
+        const hit = vouchers.find(v => amountEquals(txn.amount, -v.net_payable) && Math.abs(diffDays(v.invoice_date, txn.txn_date)) <= 4);
+        if (hit) {
+          await tx.insert(T.recon_matches).values({
+            id: uid('rm'), company_id: companyId, bank_txn_id: txn.id,
+            payment_id: null, tally_voucher_no: null,
+            match_type: 'fuzzy', confidence: 0.66, status: 'matched', matched_by: 'auto',
+            matched_at: nowIso(), notes: `Matched against KhataOS invoice ${hit.invoice_no} (no Tally voucher imported)`,
+          });
+          await tx.update(T.bank_transactions).set({ matched: 1 }).where(eq(T.bank_transactions.id, txn.id));
+          auto++; continue;
+        }
       }
     }
-  }
+
+    // Combined matches: two small debits within 2 days summing to a payment.
+    const unmatched = await tx.select().from(T.bank_transactions)
+      .where(and(eq(T.bank_transactions.company_id, companyId), eq(T.bank_transactions.matched, 0), eq(T.bank_transactions.status, 'posted'), lt(T.bank_transactions.amount, 0)))
+      .orderBy(T.bank_transactions.txn_date);
+    for (let i = 0; i < unmatched.length; i++) {
+      for (let j = i + 1; j < unmatched.length; j++) {
+        const a = unmatched[i], b = unmatched[j];
+        if (Math.abs(diffDays(a.txn_date, b.txn_date)) > 2) continue;
+        const sum = Money.fromPaise(a.amount).plus(Money.fromPaise(b.amount));
+        const hit = payments.find(p => sum.equals(Money.fromPaise(p.net_amount).negate()));
+        if (hit) {
+          await markMatched(a.id, hit.id, 'combined', 0.55, 'auto', tx);
+          await markMatched(b.id, hit.id, 'combined', 0.55, 'auto', tx);
+          auto += 2; total += 1;
+          break;
+        }
+      }
+    }
+  });
 
   return { auto, total, accuracy: total ? round2((auto / total) * 100) : 0 };
 }

@@ -17,7 +17,8 @@
 // data.
 // ============================================================================
 
-const { db, insert, get, all, run } = require('./db');
+const { insert, get, all, run, withTransaction, T } = require('./db');
+const { eq, and } = require('drizzle-orm');
 const { uid, nowIso, todayStr, daysAgo } = require('./util');
 const { Money } = require('./money');
 const { env, hasAll } = require('./config');
@@ -253,6 +254,9 @@ function mapStatement(data) {
 }
 
 // Pull a linked account's history into the platform.
+// Provider fetches (statement + balance) happen first; the statement rows,
+// daily balances and account bookkeeping then commit as ONE transaction so a
+// mid-ingestion failure can never leave a half-imported statement.
 async function pull(companyId, account, opts = {}) {
   const days = opts.recentOnly ? 7 : 90;
   const from = daysAgo(days - 1);
@@ -260,39 +264,42 @@ async function pull(companyId, account, opts = {}) {
   const json = await fetchStatement(account.account_number, from, to);
   const mapped = mapStatement(json && json.data);
 
-  let inserted = 0;
-  for (const r of mapped.rows) {
-    const exists = await get('SELECT id FROM bank_transactions WHERE account_id = ? AND external_id = ?', [account.id, r.external_id]);
-    if (exists) continue;
-    await insert('bank_transactions', {
-      id: uid('btx'), company_id: companyId, account_id: account.id,
-      external_id: r.external_id, txn_date: r.txn_date, value_date: r.value_date,
-      amount: r.amount, balance_after: r.balance_after, description: r.description,
-      mode: r.mode, ref_no: r.ref_no, status: 'posted',
-      raw_json: JSON.stringify(r), created_at: nowIso(),
-    });
-    inserted++;
-  }
-
   // balance API gives the present balance; store as today's closing balance
   let present = null;
   try { present = (await fetchBalance(account.account_number)).presentBalance; } catch { /* non-fatal */ }
-  const dayMap = new Map(mapped.rows.map(r => [r.txn_date, r.balance_after]));
-  let carry = present != null ? present : (mapped.closingBalance != null ? mapped.closingBalance : dayMap.get(to));
-  if (carry != null) {
-    for (let k = 29; k >= 0; k--) {
-      const date = daysAgo(k);
-      if (dayMap.has(date) && dayMap.get(date) != null) carry = dayMap.get(date);
-      const existing = await get('SELECT id FROM cash_daily WHERE account_id = ? AND date = ?', [account.id, date]);
-      if (existing) await run('UPDATE cash_daily SET closing_balance = ? WHERE id = ?', [carry, existing.id]);
-      else await insert('cash_daily', { id: uid('cd'), company_id: companyId, account_id: account.id, date, closing_balance: carry, source: 'decentro' });
-    }
-  }
 
-  if (mapped.name) await run('UPDATE bank_accounts SET account_name = ? WHERE id = ?', [mapped.name, account.id]);
-  if (mapped.ifsc) await run('UPDATE bank_accounts SET ifsc = ? WHERE id = ?', [mapped.ifsc, account.id]);
-  await run('UPDATE bank_accounts SET last_synced_at = ?, status = ? WHERE id = ?', [nowIso(), 'active', account.id]);
-  return { inserted, mapped_rows: mapped.rows.length, present_balance: present, account_name: mapped.name, ifsc: mapped.ifsc };
+  return withTransaction(async (tx) => {
+    let inserted = 0;
+    for (const r of mapped.rows) {
+      const exists = (await tx.select({ id: T.bank_transactions.id }).from(T.bank_transactions).where(and(eq(T.bank_transactions.account_id, account.id), eq(T.bank_transactions.external_id, r.external_id))).limit(1))[0];
+      if (exists) continue;
+      await tx.insert(T.bank_transactions).values({
+        id: uid('btx'), company_id: companyId, account_id: account.id,
+        external_id: r.external_id, txn_date: r.txn_date, value_date: r.value_date,
+        amount: r.amount, balance_after: r.balance_after, description: r.description,
+        mode: r.mode, ref_no: r.ref_no, status: 'posted',
+        raw_json: JSON.stringify(r), created_at: nowIso(),
+      });
+      inserted++;
+    }
+
+    const dayMap = new Map(mapped.rows.map(r => [r.txn_date, r.balance_after]));
+    let carry = present != null ? present : (mapped.closingBalance != null ? mapped.closingBalance : dayMap.get(to));
+    if (carry != null) {
+      for (let k = 29; k >= 0; k--) {
+        const date = daysAgo(k);
+        if (dayMap.has(date) && dayMap.get(date) != null) carry = dayMap.get(date);
+        const existing = (await tx.select({ id: T.cash_daily.id }).from(T.cash_daily).where(and(eq(T.cash_daily.account_id, account.id), eq(T.cash_daily.date, date))).limit(1))[0];
+        if (existing) await tx.update(T.cash_daily).set({ closing_balance: carry }).where(eq(T.cash_daily.id, existing.id));
+        else await tx.insert(T.cash_daily).values({ id: uid('cd'), company_id: companyId, account_id: account.id, date, closing_balance: carry, source: 'decentro' });
+      }
+    }
+
+    if (mapped.name) await tx.update(T.bank_accounts).set({ account_name: mapped.name }).where(eq(T.bank_accounts.id, account.id));
+    if (mapped.ifsc) await tx.update(T.bank_accounts).set({ ifsc: mapped.ifsc }).where(eq(T.bank_accounts.id, account.id));
+    await tx.update(T.bank_accounts).set({ last_synced_at: nowIso(), status: 'active' }).where(eq(T.bank_accounts.id, account.id));
+    return { inserted, mapped_rows: mapped.rows.length, present_balance: present, account_name: mapped.name, ifsc: mapped.ifsc };
+  });
 }
 
 module.exports = { enabled, config, fetchBalance, fetchStatement, mapStatement, pull, createLink, checkLinkStatus, finalizeLink, findBankByIfsc, providerParamFields };

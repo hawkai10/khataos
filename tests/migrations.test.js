@@ -16,17 +16,20 @@ for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
 }
 
 // Build a "legacy" DB containing only the invoice tables with duplicates,
-// as it would exist before the versioned runner was introduced.
+// as it would exist before the versioned runner was introduced. The tables
+// carry the columns the invoice dedupe / index migrations need AND the columns
+// the Drizzle baseline indexes reference, so the Drizzle migration layer can
+// also apply cleanly on top (the capture route below runs on Drizzle).
 const { DatabaseSync } = require('node:sqlite');
 const legacy = new DatabaseSync(TEST_DB);
-legacy.exec('CREATE TABLE invoices (id TEXT PRIMARY KEY, company_id TEXT, invoice_no TEXT, created_at TEXT)');
+legacy.exec('CREATE TABLE invoices (id TEXT PRIMARY KEY, company_id TEXT, invoice_no TEXT, invoice_date TEXT, status TEXT, created_at TEXT)');
 legacy.exec('CREATE TABLE invoice_lines (id TEXT PRIMARY KEY, invoice_id TEXT)');
 legacy.exec('CREATE TABLE approvals (id TEXT PRIMARY KEY, invoice_id TEXT)');
 // Legacy money: REAL rupees column, as every pre-paise database stored it.
-legacy.exec('CREATE TABLE bank_transactions (id TEXT PRIMARY KEY, amount REAL)');
-legacy.exec("INSERT INTO bank_transactions VALUES ('btx-legacy', -25000.50)");
-legacy.exec("INSERT INTO invoices VALUES ('inv-old', 'co1', 'INV-1', '2026-01-01T00:00:00.000Z')");
-legacy.exec("INSERT INTO invoices VALUES ('inv-new', 'co1', 'INV-1', '2026-01-02T00:00:00.000Z')");
+legacy.exec('CREATE TABLE bank_transactions (id TEXT PRIMARY KEY, account_id TEXT, external_id TEXT, company_id TEXT, matched INTEGER, status TEXT, txn_date TEXT, amount REAL)');
+legacy.exec("INSERT INTO bank_transactions (id, amount) VALUES ('btx-legacy', -25000.50)");
+legacy.exec("INSERT INTO invoices VALUES ('inv-old', 'co1', 'INV-1', '2026-01-01', 'approved', '2026-01-01T00:00:00.000Z')");
+legacy.exec("INSERT INTO invoices VALUES ('inv-new', 'co1', 'INV-1', '2026-01-02', 'approved', '2026-01-02T00:00:00.000Z')");
 legacy.exec("INSERT INTO invoice_lines VALUES ('line-dupe', 'inv-new')");
 legacy.exec("INSERT INTO approvals VALUES ('appr-dupe', 'inv-new')");
 legacy.close();
