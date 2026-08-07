@@ -258,11 +258,11 @@ CREATE TABLE IF NOT EXISTS "tally_health" (
 	"company_id" text PRIMARY KEY NOT NULL,
 	"last_sync_at" text,
 	"last_success_at" text,
-	"status" text DEFAULT 'connected' NOT NULL,
+	"status" text DEFAULT 'unavailable' NOT NULL,
 	"queue_depth" integer DEFAULT 0,
 	"version" text DEFAULT 'TallyPrime 4.2',
-	"mode" text DEFAULT 'single-user',
-	"uptime_30d" double precision DEFAULT 99.6,
+	"mode" text,
+	"uptime_30d" double precision,
 	"last_error" text
 );
 --> statement-breakpoint

@@ -30,11 +30,6 @@ async function login(email, password) {
     expires_at: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
   });
   await run("UPDATE users SET last_login_at = ? WHERE id = ?", [nowIso(), user.id]);
-  // bump today's DAU
-  const today = nowIso().slice(0, 10);
-  await run(`INSERT INTO usage_daily (company_id, date, dau, mau)
-       VALUES (?, ?, 1, 1)
-       ON CONFLICT(company_id, date) DO UPDATE SET dau = 3`, [user.company_id, today]);
   return { token, user: publicUser(user) };
 }
 

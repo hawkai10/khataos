@@ -338,11 +338,11 @@ CREATE TABLE IF NOT EXISTS tally_health (
   company_id TEXT PRIMARY KEY,
   last_sync_at TEXT,
   last_success_at TEXT,
-  status TEXT NOT NULL DEFAULT 'connected',
+  status TEXT NOT NULL DEFAULT 'unavailable',
   queue_depth INTEGER DEFAULT 0,
   version TEXT DEFAULT 'TallyPrime 4.2',
-  mode TEXT DEFAULT 'single-user',
-  uptime_30d REAL DEFAULT 99.6,
+  mode TEXT,
+  uptime_30d REAL,
   last_error TEXT
 );
 

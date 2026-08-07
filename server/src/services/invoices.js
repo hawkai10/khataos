@@ -23,18 +23,21 @@ async function getInvoiceDetail(coId, id) {
 async function threeWayMatch(coId, invoiceId) {
   const inv = await get('SELECT * FROM invoices WHERE id = ? AND company_id = ?', [invoiceId, coId]);
   if (!inv) throw new ApiError(404, 'invoice not found');
+  // The three-way check needs PO, receipt-note AND invoice line data. This
+  // build captures only the PO/RN reference numbers (and the invoice itself);
+  // there is no PO/receipt line data to compare, so a 'matched'/'mismatch'
+  // verdict would be fabricated. Report the real observations, and an explicit
+  // 'unavailable' when the comparison itself cannot be computed.
   let result;
   if (!inv.purchase_order_no) {
     result = { status: 'none', detail: 'No PO reference in Tally for this invoice' };
   } else if (!inv.receipt_note_no) {
     result = { status: 'pending', detail: `PO ${inv.purchase_order_no} found; awaiting receipt note` };
   } else {
-    // deterministic: Apex Steel invoice carries a quantity mismatch in the demo
-    const vendor = inv.vendor_id ? await get('SELECT name FROM vendors WHERE id = ?', [inv.vendor_id]) : null;
-    const mismatch = vendor && vendor.name.includes('Apex');
-    result = mismatch
-      ? { status: 'mismatch', detail: `Qty variance vs receipt ${inv.receipt_note_no}; flagged for review` }
-      : { status: 'matched', detail: `PO ${inv.purchase_order_no} ↔ RN ${inv.receipt_note_no} ✓` };
+    result = {
+      status: 'unavailable',
+      detail: `PO ${inv.purchase_order_no} and RN ${inv.receipt_note_no} are referenced, but PO/receipt line data is not captured — the three-way match cannot be computed`,
+    };
   }
   await withTransaction(async (tx) => {
     await tx.update(T.invoices).set({ three_way_match: result.status }).where(eq(T.invoices.id, invoiceId));

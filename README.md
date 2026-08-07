@@ -12,8 +12,11 @@ This repository contains the **runnable MVP**: a Node.js backend (SQLite via
 integrations (Account Aggregator, ICICI/HDFC direct APIs, RazorpayX/Cashfree,
 TallyPrime, GSTN) sit behind real adapter interfaces and activate when their
 credentials are configured (see `.env.example`). Nothing is simulated: an
-unconfigured provider refuses with `503` instead of fabricating data, so the
-platform only ever holds real information (see `docs/architecture.md`).
+unconfigured provider refuses with `503` instead of fabricating data, and any
+capability the build does not actually have (Tally push sync, AA consent
+verification, commercial pipeline metrics) reports an explicit `unavailable`
+rather than an invented number. The platform only ever holds information it
+computed from real data (see `docs/architecture.md`).
 
 ---
 
@@ -185,9 +188,11 @@ and are intentionally absent to protect the 6-month ship date.
 ## Success metrics this build instruments
 
 See `docs/success-metrics.md`. The product computes reconciliation accuracy,
-invoice-to-payment cycle time, and daily active usage from its own data, and
-the remaining commercial targets (100 customers at ₹3L ACV, 90% retention,
-15+ banks via AA) are tracked in the Metrics page with simulated baselines.
+invoice-to-payment cycle time, and daily active usage from its own data. The
+remaining commercial targets (100 customers at ₹3L ACV, 90% retention, 15+
+banks via AA) are tracked as goals in the Metrics page, which reports
+`unavailable` for anything it cannot compute from real data — no simulated
+baselines.
 
 ## Production notes
 

@@ -151,7 +151,7 @@ App.VIEWS.dashboard = {
             <div class="stat-row"><span class="k">Data as of</span><span class="v">${UI.freshPill(d.recon.as_of)}</span></div>
             <div class="stat-row"><span class="k">Tally sync</span><span class="v">${UI.statusPill(d.tally.status || 'disconnected')}</span></div>
             <div class="stat-row"><span class="k">Tally last sync</span><span class="v">${UI.freshPill(d.tally.last_sync_at, { freshMin: 5, warnMin: 30 })}</span></div>
-            <div class="stat-row"><span class="k">Tally uptime (30d)</span><span class="v">${d.tally.uptime_30d}%</span></div>
+            <div class="stat-row"><span class="k">Tally uptime (30d)</span><span class="v">${d.tally.uptime_30d != null ? d.tally.uptime_30d + '%' : '—'}</span></div>
           </div>
         </div>
       </div>`;
@@ -959,7 +959,7 @@ App.VIEWS.tally = {
           <div class="kv">
             <div class="item"><div class="k">Status</div><div class="v">${UI.statusPill(health.status || 'disconnected')}</div></div>
             <div class="item"><div class="k">Version</div><div class="v small">${UI.esc(health.version || '—')}</div></div>
-            <div class="item"><div class="k">Mode</div><div class="v small">${UI.esc(health.mode || '—')} ${health.mode === 'single-user' ? '(queued syncs)' : ''}</div></div>
+            <div class="item"><div class="k">Mode</div><div class="v small">${UI.esc(health.mode || '—')}</div></div>
             <div class="item"><div class="k">Queue depth</div><div class="v">${health.queue_depth}</div></div>
             <div class="item"><div class="k">Uptime (30d)</div><div class="v">${health.uptime_30d != null ? health.uptime_30d + '%' : '—'}</div></div>
             <div class="item"><div class="k">Last sync</div><div class="v">${UI.freshPill(health.last_sync_at, { freshMin: 5, warnMin: 30 })}</div></div>
@@ -968,7 +968,7 @@ App.VIEWS.tally = {
             <button class="btn small" id="tally-pull">⇩ Pull ledgers & vouchers</button>
             <a class="btn small" href="/docs/tally-connector.md" target="_blank">Connector docs</a>
           </div>
-          <p class="hint" style="margin-top:10px">Approving an invoice queues a purchase voucher here; completed payments sync back. In single-user mode the connector queues and retries until the Tally data file is free.</p>
+          <p class="hint" style="margin-top:10px">Cloud build: data reaches KhataOS via Tally XML export + upload. There is no push path to Tally — voucher syncs report <b>unavailable</b> instead of pretending a write happened.</p>
         </div>
         <div class="card">
           <h3>Recent sync activity</h3>
@@ -980,7 +980,7 @@ App.VIEWS.tally = {
                 <td class="small">${UI.esc(l.action)}</td>
                 <td>${UI.statusPill(l.status)}${l.error ? `<div class="small" style="color:var(--danger)">${UI.esc(l.error)}</div>` : ''}</td>
                 <td class="muted small">${UI.date(l.queued_at)}</td>
-                <td>${l.status === 'failed' ? `<button class="btn small" data-retry="${l.id}">Retry</button>` : ''}</td>
+                <td></td>
               </tr>`).join('')}</tbody>
           </table></div>` : UI.empty('No sync activity yet — run "Pull ledgers & vouchers"')}
         </div>
@@ -989,10 +989,6 @@ App.VIEWS.tally = {
       try { await API.post('/api/tally/pull-ledgers', {}); UI.toast('Ledger pull queued — will sync shortly'); setTimeout(() => App.navigate('tally'), 1600); }
       catch (err) { UI.toast(err.message, 'err'); }
     };
-    el.querySelectorAll('[data-retry]').forEach(b => b.addEventListener('click', async () => {
-      try { await API.post(`/api/tally/retry/${b.dataset.retry}`, {}); UI.toast('Retry queued'); App.navigate('tally'); }
-      catch (err) { UI.toast(err.message, 'err'); }
-    }));
   },
 };
 
@@ -1065,37 +1061,34 @@ App.VIEWS.onboarding = {
    ==================================================================== */
 App.VIEWS.metrics = {
   title: 'Success Metrics',
-  sub: 'MVP targets defined before code — instrumented where the product can self-report',
+  sub: 'Only values computed from this system\'s own data — everything else reports unavailable',
   async render(el) {
     const m = await API.get('/api/metrics');
-    const bar = (val, target, invert = false) => {
-      const pct = Math.min(100, Math.round((val / target) * 100));
+    const bar = (val, target) => {
+      if (val == null) return '<div class="small muted">not computed</div>';
+      const pct = Math.min(100, Math.round((val / Math.max(1, target)) * 100));
       return `<div class="metric-bar"><div class="${pct >= 100 ? 'hit' : 'miss'}" style="width:${pct}%"></div></div>
-        <div class="small muted" style="margin-top:3px">${invert ? `${val} ≤ target ${target}` : `${val} of target ${target}`}</div>`;
+        <div class="small muted" style="margin-top:3px">${val} of target ${target}</div>`;
     };
+    const unavailable = (detail) => `<div class="small" style="color:var(--warn)">Unavailable — ${UI.esc(detail)}</div>`;
     el.innerHTML = `
       <div class="grid cols-2">
         <div class="card">
           <h3>Commercial</h3>
-          <div class="stat-row"><span class="k">Paying customers (6 mo)</span><span class="v">${m.customers.paying} (target ${m.customers.target})</span></div>
-          ${bar(m.customers.paying, m.customers.target)}
-          <div class="stat-row" style="margin-top:8px"><span class="k">Average contract value</span><span class="v">${UI.inr(m.customers.acv_inr)} / yr (target ₹3,00,000)</span></div>
-          <div class="stat-row"><span class="k">Retention at 6 months</span><span class="v">${m.customers.retention_6m}% (target > 90%)</span></div>
-          <div class="stat-row"><span class="k">Banks reachable (AA + direct)</span><span class="v">${m.banks.connected} (target ${m.banks.target})</span></div>
+          <div class="stat-row"><span class="k">Customers</span><span class="v">${unavailable(m.customers.detail)}</span></div>
+          <div class="stat-row" style="margin-top:8px"><span class="k">Bank accounts connected</span><span class="v">${m.banks.connected} (target ${m.banks.target})</span></div>
           <div style="margin-top:4px">${bar(m.banks.connected, m.banks.target)}</div>
-          <p class="hint" style="margin-top:8px">Simulated baselines — replace with live sales pipeline input.</p>
+          <p class="hint" style="margin-top:8px">Customer/pipeline numbers need a sales source this build does not have — no invented baselines.</p>
         </div>
         <div class="card">
           <h3>Product</h3>
-          <div class="stat-row"><span class="k">Tally sync uptime (30d)</span><span class="v">${m.tally_uptime}% (target ≥ ${m.target_uptime}%)</span></div>
-          ${bar(m.tally_uptime, m.target_uptime)}
+          <div class="stat-row"><span class="k">Tally sync uptime (30d)</span><span class="v">${m.tally_uptime != null ? m.tally_uptime + '% (target ≥ ' + m.target_uptime + '%)' : unavailable('no live Tally connection — uptime cannot be computed')}</span></div>
           <div class="stat-row" style="margin-top:8px"><span class="k">Auto bank reconciliation</span><span class="v">${m.recon.accuracy}% (target ≥ ${m.recon.target}%)</span></div>
           ${bar(m.recon.accuracy, m.recon.target)}
-          <div class="stat-row" style="margin-top:8px"><span class="k">Invoice→payment cycle</span><span class="v">${m.cycle.avg_days != null ? m.cycle.avg_days + 'd vs baseline ' + m.cycle.baseline_days + 'd' : '—'}</span></div>
-          <div class="stat-row"><span class="k">Improvement</span><span class="v" style="color:${(m.cycle.improvement_pct || 0) >= m.cycle.target_pct ? 'var(--ok)' : 'var(--warn)'}">${m.cycle.improvement_pct != null ? m.cycle.improvement_pct + '%' : '—'} (target ≥ ${m.cycle.target_pct}%)</span></div>
-          <div class="stat-row"><span class="k">Daily active users</span><span class="v">${m.engagement.dau}/${m.engagement.mau} (${m.engagement.daumau_pct}% · target ≥ ${m.engagement.target_pct}%)</span></div>
-          ${bar(m.engagement.dau, m.engagement.mau)}
-          <p class="hint" style="margin-top:8px">DAU/MAU updates from real logins; cycle time and recon accuracy are computed from live platform data.</p>
+          <div class="stat-row" style="margin-top:8px"><span class="k">Invoice→payment cycle</span><span class="v">${m.cycle.avg_days != null ? m.cycle.avg_days + 'd' : '—'}</span></div>
+          <div class="stat-row"><span class="k">Daily active users</span><span class="v">${m.engagement.dau}/${m.engagement.mau}${m.engagement.daumau_pct != null ? ` (${m.engagement.daumau_pct}% · target ≥ ${m.engagement.target_pct}%)` : ' — insufficient logins'}</span></div>
+          ${bar(m.engagement.dau, m.engagement.mau || 1)}
+          <p class="hint" style="margin-top:8px">DAU/MAU from real logins (sessions); cycle time and recon accuracy are computed from live data.</p>
         </div>
       </div>`;
   },
@@ -1180,7 +1173,7 @@ App.VIEWS.system = {
         ${UI.kpiCard({ icon: 'activity', label: 'Platform status', value: overall === 'operational' ? 'Operational' : 'Needs attention', sub: `uptime ${Math.floor(h.app.uptime_seconds / 60)} min · Node ${UI.esc(h.app.node)}`, alert: overall !== 'operational' })}
         ${UI.kpiCard({ icon: 'database', label: 'Database', value: h.database.engine === 'sqlite' ? 'SQLite' : 'PostgreSQL', sub: `${h.database.tables} tables · ${engineLabel}`, alert: !dbUp })}
         ${UI.kpiCard({ icon: 'cpu', label: 'Event queue', value: `${h.queue.pending} pending`, sub: `${h.queue.processed} processed · ${h.queue.failed} failed`, alert: !queueOk })}
-        ${UI.kpiCard({ icon: 'plug', label: 'Tally connector', value: h.integrations.tally ? (h.integrations.tally.status || '—') : '—', sub: `uptime ${h.integrations.tally ? h.integrations.tally.uptime_30d + '%' : '—'}`, alert: !tallyOk })}
+        ${UI.kpiCard({ icon: 'plug', label: 'Tally connector', value: h.integrations.tally ? (h.integrations.tally.status || '—') : '—', sub: `uptime ${h.integrations.tally ? (h.integrations.tally.uptime_30d != null ? h.integrations.tally.uptime_30d + '%' : '—') : '—'}`, alert: !tallyOk })}
       </div>
       <div class="grid cols-2">
         <div class="card">

@@ -4,8 +4,11 @@ KhataOS is a single-dashboard finance platform for Indian mid-market companies:
 multi-bank cash visibility, accounts payable + approvals, payment execution,
 bank reconciliation, GST tracking, and TallyPrime sync. It is a real-data
 product — nothing is simulated. Unconfigured providers refuse with `503`
-instead of fabricating data; data only enters through real channels (Tally XML
-import, bank statements, GSTR-2B fetches, forwarded invoices).
+instead of fabricating data, and capabilities the build does not actually have
+(Tally push sync, AA consent verification, commercial pipeline metrics) return
+an explicit `unavailable` status instead of an invented number; data only
+enters through real channels (Tally XML import, bank statements, GSTR-2B
+fetches, forwarded invoices).
 
 ## Repository layout
 

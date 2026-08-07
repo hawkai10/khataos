@@ -101,6 +101,9 @@ async function insertPayment(db, coId, opts) {
     amount: Number(amount.toPaise()), mode, type, status,
     scheduled_date: scheduledDate || null,
     bank_account_id: accountId || null,
+    // `reference` is a local identifier for the payment (the eventual bank
+    // statement carries its own real ref); a random placeholder is an
+    // identifier, not a claimed data point.
     reference: `${mode}-${String(Math.floor(Math.random() * 90000000) + 10000000)}`,
     gateway: 'razorpayx', gst_ledger: vendor.ledger_name, tds_section: vendor.tds_section,
     tds_amount: Number(tds.toPaise()), net_amount: Number(net.toPaise()),

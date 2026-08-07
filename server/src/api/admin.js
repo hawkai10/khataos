@@ -157,19 +157,29 @@ async function register(fastify) {
       const processed = p.processed_at.slice(0, 10);
       return s + Math.max(0, Math.round((new Date(processed) - new Date(received)) / 86400000));
     }, 0) / completed.length) : null;
-    const baseline = 11.2;
-    const improvement = cycleDays != null ? round2(((baseline - cycleDays) / baseline) * 100) : null;
-    const today = todayStr();
-    const usage = await get('SELECT * FROM usage_daily WHERE company_id = ? AND date = ?', [coId, today]);
-    const dau = usage ? usage.dau : 0;
+    // Real engagement: distinct users with a login session today / in the last
+    // 30 days — computed from the sessions table, never a hardcoded figure.
+    const since = (ms) => new Date(Date.now() - ms).toISOString();
+    const dauRow = await get(`SELECT COUNT(DISTINCT s.user_id) AS c FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.company_id = ? AND s.created_at >= ?`, [coId, todayStr() + 'T00:00:00.000Z']);
+    const mauRow = await get(`SELECT COUNT(DISTINCT s.user_id) AS c FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.company_id = ? AND s.created_at >= ?`, [coId, since(30 * 24 * 3600 * 1000)]);
+    const dau = Number(dauRow ? dauRow.c : 0);
+    const mau = Number(mauRow ? mauRow.c : 0);
+    const daumau = mau > 0 ? round2((dau / mau) * 100) : null;
+    const banksConnected = (await get('SELECT COUNT(*) AS c FROM bank_accounts WHERE company_id = ? AND status = ?', [coId, 'active'])).c;
     const tally = await TallyConnector.health(coId);
     reply.ok({
-      customers: { paying: 12, pipeline: 21, target: 100, acv_inr: 300000, retention_6m: 92 },
-      banks: { connected: 17, target: 15 },
-      tally_uptime: tally.uptime_30d, target_uptime: 99.5,
+      // Commercial metrics need a sales/CRM source this build does not have —
+      // surface that explicitly instead of showing invented pipeline numbers.
+      customers: { status: 'unavailable', detail: 'customer and subscription data is not collected by this build' },
+      banks: { connected: Number(banksConnected), target: 15 },
+      // No live Tally connection -> no observed uptime; null means "not
+      // computed", and the UI renders it as unavailable.
+      tally_uptime: tally.uptime_30d != null ? Number(tally.uptime_30d) : null, target_uptime: 99.5,
       recon: { accuracy: score.accuracy, target: 70 },
-      cycle: { avg_days: cycleDays, baseline_days: baseline, improvement_pct: improvement, target_pct: 50 },
-      engagement: { dau, mau: 3, daumau_pct: round2((dau / 3) * 100), target_pct: 60 },
+      // Cycle time is real; the "improvement vs a manual baseline" comparison
+      // was invented (11.2 days) and is removed.
+      cycle: { avg_days: cycleDays },
+      engagement: { dau, mau, daumau_pct: daumau, target_pct: 60 },
     });
   });
 

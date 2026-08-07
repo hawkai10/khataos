@@ -214,6 +214,8 @@ const TallyConnector = {
     const q = await get(`SELECT COUNT(*) AS c FROM tally_sync_logs WHERE company_id = ? AND status IN ('queued','retrying')`, [companyId]);
     return {
       ...(h || {}),
+      // No health row yet = no connection observed: report the honest default.
+      status: (h && h.status) || 'unavailable',
       queue_depth: q ? q.c : 0,
       connected: !!(h && h.status === 'connected'),
       connector: Tally.config(),
@@ -221,16 +223,17 @@ const TallyConnector = {
   },
 
   async heartbeat(companyId, db) {
+    // Cloud build (XML upload): there is NO live Tally connection, so there is
+    // no connectivity to observe and no uptime to compute. This only records
+    // that a real sync operation ran (last_sync_at); status stays
+    // 'unavailable' and uptime_30d stays null — never a fabricated SLA.
     const d = db || await getDrizzle();
-    const h = (await d.select().from(T.tally_health).where(eq(T.tally_health.company_id, companyId)).limit(1))[0];
-    // Uptime starts at 100% (no fabricated baseline) and converges back up
-    // after any reported downtime.
-    const uptime = h && h.uptime_30d != null ? h.uptime_30d : 100;
     const now = nowIso();
+    const h = (await d.select().from(T.tally_health).where(eq(T.tally_health.company_id, companyId)).limit(1))[0];
     if (h) {
-      await d.update(T.tally_health).set({ last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: Math.min(100, Math.round((uptime + 0.001) * 100) / 100) }).where(eq(T.tally_health.company_id, companyId));
+      await d.update(T.tally_health).set({ last_sync_at: now, status: 'unavailable' }).where(eq(T.tally_health.company_id, companyId));
     } else {
-      await d.insert(T.tally_health).values({ company_id: companyId, last_sync_at: now, last_success_at: now, status: 'connected', uptime_30d: 100 });
+      await d.insert(T.tally_health).values({ company_id: companyId, last_sync_at: now, status: 'unavailable' });
     }
   },
 
@@ -243,28 +246,26 @@ const TallyConnector = {
     });
   },
 
-  // Invoice approved -> create purchase voucher in Tally
+  // Invoice approved -> the voucher would need to be created in Tally. The
+  // cloud build has no Tally write path (export + XML re-import is the only
+  // transport), so the sync log records the honest 'unavailable' state
+  // instead of pretending a push happened.
   async createPurchaseVoucher(invoiceId) {
     const inv = await get('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
     if (!inv) return;
-    await TallyConnector.logSync(inv.company_id, 'voucher', invoiceId, 'create', 'queued');
-    // brief queue emulating Tally single-user mode before the sync is marked
-    setTimeout(async () => {
-      await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), invoiceId]);
-      await TallyConnector.heartbeat(inv.company_id);
-    }, 900);
+    await TallyConnector.logSync(inv.company_id, 'voucher', invoiceId, 'create', 'unavailable',
+      'no Tally write path in cloud mode — export the voucher and re-import via XML upload');
   },
 
   async syncPaymentToTally(paymentId) {
     const p = await get('SELECT * FROM payments WHERE id = ?', [paymentId]);
     if (!p) return;
-    const synced = p.status === 'completed';
-    await TallyConnector.logSync(p.company_id, 'voucher', paymentId, 'create', synced ? 'queued' : 'failed', synced ? null : 'payment failed, voucher not created');
-    if (!synced) return;
-    setTimeout(async () => {
-      await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE entity_id=? AND entity='voucher' AND status='queued'", [nowIso(), paymentId]);
-      await TallyConnector.heartbeat(p.company_id);
-    }, 1000);
+    if (p.status !== 'completed') {
+      await TallyConnector.logSync(p.company_id, 'voucher', paymentId, 'create', 'failed', 'payment not completed — voucher not created');
+      return;
+    }
+    await TallyConnector.logSync(p.company_id, 'voucher', paymentId, 'create', 'unavailable',
+      'no Tally write path in cloud mode — export the voucher and re-import via XML upload');
   },
 
   // Pull ledger masters from the imported Tally XML and re-run vendor

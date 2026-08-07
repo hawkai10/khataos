@@ -3,8 +3,7 @@
 // Tally domain (Fastify plugin): connector health, sync logs, XML import and
 // vendor-ledger mapping.
 
-const { all, get, run, update } = require('../db');
-const { nowIso } = require('../util');
+const { all, get } = require('../db');
 const { ApiError, audit, requireRole } = require('../auth');
 const { TallyConnector } = require('../adapters');
 const TallyImport = require('../tally-import');
@@ -94,17 +93,15 @@ async function register(fastify) {
     reply.ok(result);
   });
 
+  // Retrying a sync implies a write path to Tally, which the cloud build does
+  // not have (export + XML re-import is the only transport). There is nothing
+  // to retry — refuse explicitly instead of pretending a sync happened.
   fastify.post('/api/tally/retry/:id', async (request, reply) => {
     const user = request.user;
     requireRole(user, ['cfo', 'finance_manager']);
     const log = await get('SELECT * FROM tally_sync_logs WHERE id = ? AND company_id = ?', [request.params.id, companyOf(user)]);
     if (!log) throw new ApiError(404, 'sync log not found');
-    await update('tally_sync_logs', log.id, { status: 'queued', error: null, queued_at: nowIso() });
-    setTimeout(async () => {
-      await run("UPDATE tally_sync_logs SET status='synced', synced_at=? WHERE id=?", [nowIso(), log.id]);
-      await TallyConnector.heartbeat(companyOf(user));
-    }, 1000);
-    reply.ok({ retried: true });
+    throw new ApiError(503, 'Tally sync is unavailable in the cloud build — vouchers are exported from Tally and re-imported via XML; there is no push path to retry');
   });
 }
 

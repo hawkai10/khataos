@@ -140,7 +140,7 @@ export function Dashboard({ user }) {
         <MiniStatus title="Tally connector" rows={[
           ['Status', d.tally.status || '—'],
           ['Version', d.tally.version || '—'],
-          ['Uptime (30d)', `${d.tally.uptime_30d ?? 0}%`],
+          ['Uptime (30d)', d.tally.uptime_30d != null ? `${d.tally.uptime_30d}%` : 'Unavailable'],
           ['Last sync', d.tally.last_sync_at ? fmtDate(d.tally.last_sync_at) : '—'],
         ]} />
       </div>

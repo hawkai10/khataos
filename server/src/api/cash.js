@@ -3,12 +3,12 @@
 // Cash & banks domain (Fastify plugin): bank accounts, cash views, AA consent,
 // bank data refresh and Decentro connected-banking integration.
 
-const { all, get, insert, withTransaction, T } = require('../db');
+const { all, get, withTransaction, T } = require('../db');
 const { eq, and } = require('drizzle-orm');
-const { uid, nowIso, todayStr } = require('../util');
+const { uid, nowIso } = require('../util');
 const { Money } = require('../money');
 const { ApiError, audit } = require('../auth');
-const { BankDataProvider, TallyConnector } = require('../adapters');
+const { BankDataProvider } = require('../adapters');
 const Decentro = require('../decentro');
 const recon = require('../recon');
 const Cash = require('../services/cash');
@@ -73,25 +73,11 @@ async function register(fastify) {
   fastify.post('/api/aa/consent/verify', async (request, reply) => {
     const user = request.user;
     const { consent_id, otp } = bodyOf(request);
-    const approved = BankDataProvider.verifyConsent(consent_id, otp);
-    const c = approved; // {consentId, status...}
-    const consentMeta = await get('SELECT * FROM banks WHERE code = ?', [request.body.bank_code || '']);
-    const accountId = uid('acc');
-    const accNum = request.body.account_number || String(Math.floor(Math.random() * 90000000000) + 10000000000);
-    await insert('bank_accounts', {
-      id: accountId, company_id: companyOf(user), bank_code: request.body.bank_code || 'ICIC',
-      account_name: `${consentMeta ? consentMeta.name : 'New Bank'} Current - New`, account_number: accNum,
-      type: 'current', ifsc: consentMeta && consentMeta.code === 'ICIC' ? 'ICIC0000022' : 'HDFC0001234',
-      status: 'active', source: 'aa', consent_id: consent_id,
-      opened_at: todayStr(),
-    });
-    const account = await get('SELECT * FROM bank_accounts WHERE id = ?', [accountId]);
-    await BankDataProvider.fetchTransactions(companyOf(user), { ...account, opening_balance: Number(Money.fromRupees(1500000 + Math.floor(Math.random() * 500000)).toPaise()) });
-    await withTransaction(async (tx) => {
-      await tx.update(T.onboarding_steps).set({ status: 'done', at: nowIso() }).where(and(eq(T.onboarding_steps.company_id, companyOf(user)), eq(T.onboarding_steps.step, 'connect_bank')));
-      await audit(companyOf(user), user, 'aa.consent_approved', 'bank_account', accountId, { consent: consent_id }, tx);
-    });
-    reply.ok({ consent: approved, account });
+    // verifyConsent refuses with 503 until a real AA provider is configured.
+    // It NEVER fabricates an account, account number, or opening balance — the
+    // old path that created bank_accounts from Math.random values is gone.
+    const result = await BankDataProvider.verifyConsent(consent_id, otp);
+    reply.ok(result);
   });
 
   fastify.post('/api/cash/refresh', async (request, reply) => {
@@ -135,7 +121,6 @@ async function register(fastify) {
     }
     const stats = await recon.matchAll(coId);
     const voucherMatched = await recon.autoVoucherMatch(coId, 7);
-    await TallyConnector.heartbeat(coId);
     reply.ok({ added_transactions: added, decentro_transactions: decentroAdded, decentro_accounts: decentroAccounts.length, skipped_accounts: skipped, voucher_matched: voucherMatched, recon: stats });
   });
 

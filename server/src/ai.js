@@ -276,7 +276,7 @@ async function answerFor(intent, coId, user) {
       const mins = minsSince(h.last_sync_at);
       return {
         intent, data: h,
-        answer: `Tally connector is ${h.status === 'connected' ? 'healthy' : h.status} (${h.version || 'TallyPrime'}, ${h.mode || 'single-user'})${mins != null ? ` — last sync ${mins} min ago` : ''}, uptime ${h.uptime_30d != null ? h.uptime_30d + '%' : 'n/a'} over 30 days.`,
+        answer: `Tally connector is ${h.status === 'connected' ? 'healthy' : h.status} (${h.version || 'TallyPrime'}${h.mode ? `, ${h.mode}` : ''})${mins != null ? ` — last sync ${mins} min ago` : ''}, uptime ${h.uptime_30d != null ? h.uptime_30d + '%' : 'not computed (no live connection)'} over 30 days.`,
       };
     }
     case 'approvals': {

@@ -210,7 +210,7 @@ async function waitForServer(proc, ms = 20000) {
 
     // ---- TALLY CHANNEL: XML import + aging ----
     const tally = await api('GET', '/api/tally/health', null, cfo);
-    check('tally: health endpoint', !!tally && (tally.status === 'connected' || tally.status === 'degraded') && tally.connector && tally.connector.provider === 'tally-xml-upload', tally.connector ? tally.connector.provider : 'no connector');
+    check('tally: health endpoint reports the cloud build honestly (no live connection)', !!tally && tally.status === 'unavailable' && tally.connected === false && tally.uptime_30d == null && tally.connector && tally.connector.provider === 'tally-xml-upload', `status=${tally.status} connected=${tally.connected} uptime=${tally.uptime_30d}`);
     const importRes = await api('POST', '/api/tally/import-xml', {
       xml: '<ENVELOPE><BODY><DATA><TALLYMESSAGE><GROUP><NAME>Current Liabilities</NAME></GROUP></TALLYMESSAGE><TALLYMESSAGE><GROUP><NAME>Sundry Creditors</NAME><PARENT>Current Liabilities</PARENT></GROUP></TALLYMESSAGE><TALLYMESSAGE><LEDGER><NAME>Smoke Vendor Traders</NAME><PARENT>Sundry Creditors</PARENT><GSTIN>29ABCDE1234F1Z5</GSTIN></LEDGER></TALLYMESSAGE><TALLYMESSAGE><VOUCHER><DATE>' + today.replace(/-/g, '') + '</DATE><VOUCHERNUMBER>PU-SM-1</VOUCHERNUMBER><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME><PARTYLEDGERNAME>Smoke Vendor Traders</PARTYLEDGERNAME><AMOUNT>59000</AMOUNT><LEDGERENTRIES.LIST><LEDGERNAME>Purchase Account</LEDGERNAME><AMOUNT>-59000.00</AMOUNT></LEDGERENTRIES.LIST><LEDGERENTRIES.LIST><LEDGERNAME>Smoke Vendor Traders</LEDGERNAME><AMOUNT>59000.00</AMOUNT></LEDGERENTRIES.LIST></VOUCHER></TALLYMESSAGE></DATA></BODY></ENVELOPE>',
     }, cfo);
@@ -257,6 +257,7 @@ async function waitForServer(proc, ms = 20000) {
     // ---- metrics + assistant + freshness + system ----
     const metrics = await api('GET', '/api/metrics', null, cfo);
     check('metrics: recon target 70', metrics.recon.target === 70);
+    check('metrics: unavailable capabilities are explicit, never invented', metrics.customers.status === 'unavailable' && metrics.tally_uptime == null && metrics.cycle.improvement_pct == null && typeof metrics.engagement.dau === 'number' && typeof metrics.engagement.mau === 'number');
     const prompts = await api('GET', '/api/assistant/prompts', null, cfo);
     check('assistant: prompt catalogue', Array.isArray(prompts.prompts) && prompts.prompts.length >= 4);
     const suggestions = await api('GET', '/api/assistant/suggestions', null, cfo);

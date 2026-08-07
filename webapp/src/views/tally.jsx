@@ -48,7 +48,6 @@ export function Tally({ user }) {
   const canSync = user && ['cfo', 'finance_manager'].includes(user.role);
   const failed = logs.filter((l) => l.status === 'failed').length;
   const queued = health ? Number(health.queue_depth || 0) : 0;
-
   return (
     <div className="space-y-5">
       <PageHeader
@@ -69,13 +68,13 @@ export function Tally({ user }) {
         <KpiCard icon={Activity} label="Connector status" value={health ? health.status : '—'} sub={health ? health.version : ''} alert={health && health.status !== 'connected'} />
         <KpiCard icon={Layers} label="Queue depth" value={String(queued)} sub="pending sync operations" accent="bg-sky-100 text-sky-800" />
         <KpiCard icon={RotateCcw} label="Failed syncs" value={String(failed)} sub="in the recent window" accent="bg-red-100 text-red-800" alert={failed > 0} />
-        <KpiCard icon={Activity} label="Uptime (30d)" value={health ? `${health.uptime_30d ?? 0}%` : '—'} sub={`target ${health ? health.uptime_target ?? 99.5 : 99.5}%`} />
+        <KpiCard icon={Activity} label="Uptime (30d)" value={health && health.uptime_30d != null ? `${health.uptime_30d}%` : 'Unavailable'} sub={health && health.uptime_30d != null ? `target ${health.uptime_target ?? 99.5}%` : 'no live Tally connection'} />
       </div>
 
-      {health ? (
+      {health && health.uptime_30d != null ? (
         <Card>
-          <CardHeader><CardTitle>Uptime vs target</CardTitle><CardDescription>{health.uptime_30d ?? 0}% over the last 30 days — target 99.5%</CardDescription></CardHeader>
-          <CardContent><Progress value={Math.min(100, Number(health.uptime_30d || 0))} className="flex-1" /></CardContent>
+          <CardHeader><CardTitle>Uptime vs target</CardTitle><CardDescription>{health.uptime_30d}% over the last 30 days — target {health.uptime_target ?? 99.5}%</CardDescription></CardHeader>
+          <CardContent><Progress value={Math.min(100, Number(health.uptime_30d))} className="flex-1" /></CardContent>
         </Card>
       ) : null}
 
@@ -105,18 +104,12 @@ export function Tally({ user }) {
                   <TableCell><span className="font-medium">{l.entity}</span> <span className="text-xs text-muted-foreground">· {l.entity_id || ''}</span></TableCell>
                   <TableCell>{l.action}</TableCell>
                   <TableCell>
-                    <Badge variant={l.status === 'synced' ? 'success' : l.status === 'failed' ? 'destructive' : 'warning'}>{l.status}</Badge>
+                    <Badge variant={l.status === 'synced' ? 'success' : l.status === 'failed' ? 'destructive' : l.status === 'unavailable' ? 'secondary' : 'warning'}>{l.status}</Badge>
                   </TableCell>
                   <TableCell className="max-w-[220px] truncate text-xs text-muted-foreground" title={l.error}>{l.error || '—'}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{fmtDateTime(l.queued_at)}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{fmtDateTime(l.synced_at)}</TableCell>
-                  <TableCell className="text-right">
-                    {l.status === 'failed' && canSync ? (
-                      <Button size="sm" variant="ghost" onClick={() => act(() => post(`/api/tally/retry/${l.id}`), 'Retry queued')}>
-                        <RotateCcw className="h-3.5 w-3.5" /> Retry
-                      </Button>
-                    ) : null}
-                  </TableCell>
+                  <TableCell className="text-right"></TableCell>
                 </TableRow>
               ))}
               {!logs.length ? <TableRow><TableCell colSpan={7} className="py-10 text-center text-xs text-muted-foreground">No sync activity yet.</TableCell></TableRow> : null}

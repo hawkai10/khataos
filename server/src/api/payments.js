@@ -218,7 +218,10 @@ async function register(fastify) {
         matched_by: user.id, matched_at: nowIso(), notes: 'voucher created from unmatched transaction',
       });
       await tx.update(T.bank_transactions).set({ matched: 1 }).where(eq(T.bank_transactions.id, txn.id));
-      await TallyConnector.logSync(coId, 'voucher', vno, 'create', 'synced', null, tx);
+      // The voucher exists only in KhataOS — it has NOT been pushed to Tally.
+      // Log it honestly instead of claiming a sync happened.
+      await TallyConnector.logSync(coId, 'voucher', vno, 'create', 'unavailable',
+        'voucher created locally in KhataOS — no Tally push path; export and re-import via XML to bring it into Tally', tx);
       await audit(coId, user, 'recon.voucher_created', 'bank_transaction', txn.id, { voucher: vno }, tx);
     });
     reply.ok({ voucher_no: vno });
