@@ -511,7 +511,7 @@ function captureModal(mode) {
         <div class="field"><label>Invoice date</label><input id="m-date" type="date"></div>
         <div class="field"><label>Due date</label><input id="m-due" type="date"></div>
         <div class="field"><label>Taxable amount (₹) *</label><input id="m-tax" type="number" step="0.01" min="0"></div>
-        <div class="field"><label>Inter-state (IGST 18%)</label><select id="m-inter"><option value="0">No — CGST+SGST 9% each</option><option value="1">Yes — IGST 18%</option></select></div>
+        <div class="field"><label>GST rate (%) *</label><input id="m-gstrate" type="number" step="0.01" min="0" max="40" placeholder="e.g. 18 (0 for exempt)"></div>
         <div class="field"><label>GSTIN of supplier</label><input id="m-gstin" placeholder="29AAAAA0000A1Z5"></div>
         <div class="field"><label>Purchase order (Tally)</label><input id="m-po" placeholder="PO-2026-XXX"></div>
       </div>
@@ -526,12 +526,14 @@ function captureModal(mode) {
   document.getElementById('m-save').onclick = async () => {
     const no = document.getElementById('m-no').value.trim();
     const tax = parseFloat(document.getElementById('m-tax').value);
+    const gstRate = parseFloat(document.getElementById('m-gstrate').value);
     if (!no || isNaN(tax)) return UI.toast('Invoice no and taxable amount required', 'err');
+    if (isNaN(gstRate)) return UI.toast('GST rate required — the server never guesses a rate (0 for exempt)', 'err');
     try {
       await API.post('/api/invoices/capture', {
         source: 'manual', invoice_no: no, vendor_id: document.getElementById('m-vendor').value || null,
         invoice_date: document.getElementById('m-date').value, due_date: document.getElementById('m-due').value || undefined,
-        taxable_amount: tax, igst: document.getElementById('m-inter').value === '1' ? tax * 0.18 : 0,
+        taxable_amount: tax, gst_rate: gstRate,
         gstin_vendor: document.getElementById('m-gstin').value || undefined,
         purchase_order_no: document.getElementById('m-po').value || undefined,
       });

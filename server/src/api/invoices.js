@@ -11,6 +11,7 @@ const { ApiError, audit } = require('../auth');
 const { queue, OcrEngine, createApprovalChain } = require('../adapters');
 const Aging = require('../services/aging');
 const Invoices = require('../services/invoices');
+const Tax = require('../services/tax');
 const { bodyOf } = require('./validators');
 const { companyOf, parseUrl, queryParam, rupees, publicize, publicizeRows } = require('./helpers');
 
@@ -72,20 +73,77 @@ async function register(fastify) {
       fields = OcrEngine.extract(text);
       fields.source = 'pdf_upload';
       if (fields.gstin && !fields.gstin_vendor) fields.gstin_vendor = fields.gstin;
+      // OCR extracts money in paise; the capture contract below is rupee
+      // units — normalize so both paths are treated identically.
+      for (const k of ['taxable_amount', 'cgst', 'sgst', 'igst', 'cess', 'tds_amount']) {
+        if (fields[k] != null) fields[k] = Money.fromPaise(fields[k]).toRupees();
+      }
     } else {
       fields = b;
       fields.source = 'manual';
     }
     const vendor = fields.vendor_id ? await get('SELECT * FROM vendors WHERE id = ? AND company_id = ?', [fields.vendor_id, coId]) : null;
-    const taxable = Money.fromRupees(fields.taxable_amount || 0);
-    const inter = Money.fromRupees(fields.igst || 0).gt(Money.fromPaise(0));
-    const cgst = fields.cgst != null ? Money.fromRupees(fields.cgst) : (inter ? Money.fromPaise(0) : taxable.percentBps(900));
-    const sgst = fields.sgst != null ? Money.fromRupees(fields.sgst) : (inter ? Money.fromPaise(0) : taxable.percentBps(900));
-    const igst = fields.igst != null ? Money.fromRupees(fields.igst) : (inter ? taxable.percentBps(1800) : Money.fromPaise(0));
-    const gross = taxable.plus(cgst).plus(sgst).plus(igst);
-    const tdsRate = vendor ? vendor.tds_rate : 0;
-    const tds = gross.percentBps(Math.round((tdsRate || 0) * 10000));
+    const company = await get('SELECT gstin FROM companies WHERE id = ?', [coId]);
     if (!fields.invoice_no) throw new ApiError(400, 'invoice_no required');
+    if (fields.taxable_amount == null || fields.taxable_amount === '') throw new ApiError(400, 'taxable_amount required');
+    // GST: never guessed. The rate comes from the caller (invoice gst_rate or
+    // per-line gst_rate), the intra/inter split is derived from the company +
+    // supplier GSTIN state codes, and cess is explicit — anything undecidable
+    // is a 400 (see services/tax.js).
+    //
+    // Units contract: top-level taxable_amount/cgst/sgst/igst/cess are rupee
+    // amounts ("50000", "4500.00"); line hsns[].taxable/cgst/sgst/igst/cess
+    // are integer paise (the OCR extracts paise). gst_rate is a percentage.
+    const taxable = Money.fromRupees(fields.taxable_amount);
+    // Explicit tax amounts arrive in rupee units; the tax service works in
+    // paise — normalize before computing.
+    const explicitPaise = {};
+    for (const k of ['cgst', 'sgst', 'igst', 'cess']) {
+      explicitPaise[k] = (fields[k] != null && fields[k] !== '') ? Money.fromRupees(fields[k]).toPaise() : undefined;
+    }
+    let supplierGstin = fields.gstin_vendor || (vendor ? vendor.gstin : null);
+    if (source === 'pdf' && company && supplierGstin && supplierGstin === company.gstin) {
+      // OCR picks the first 15-char GSTIN in the text; when it matches the
+      // company's own GSTIN we are likely reading the buyer, not the supplier —
+      // the place of supply is undecidable, so refuse rather than guess.
+      throw new ApiError(400, 'supplier GSTIN from the OCR text matches the company GSTIN — cannot determine place of supply; enter the supplier GSTIN');
+    }
+    // OCR line extraction is unreliable (columns/lines get missed), so the pdf
+    // path derives its totals from the invoice-level OCR fields only; the raw
+    // lines are still stored below for reference, never as the tax authority.
+    const taxLines = source === 'pdf' ? [] : (fields.hsns || []);
+    const gst = Tax.computeGst({
+      taxablePaise: taxable.toPaise(),
+      lines: taxLines,
+      gstRatePct: fields.gst_rate,
+      explicit: explicitPaise,
+      companyGstin: company ? company.gstin : null,
+      supplierGstin,
+    });
+    // Persisted line rows: tax-computed for manual capture, raw OCR reads for
+    // pdf (informational — totals come from the invoice-level fields above).
+    const lineRows = gst.lineRows.length
+      ? gst.lineRows
+      : (fields.hsns || []).map((l) => ({ hsn: l.hsn || null, description: l.description || null, qty: l.qty || 1, rate: l.rate || 0, taxable: Number(l.taxable || 0), cgst: Number(l.cgst || 0), sgst: Number(l.sgst || 0), igst: Number(l.igst || 0), cess: Number(l.cess || 0) }));
+    const gross = taxable.plus(Money.fromPaise(gst.cgst)).plus(Money.fromPaise(gst.sgst)).plus(Money.fromPaise(gst.igst)).plus(Money.fromPaise(gst.cess));
+    // TDS per CBDT Circular 23/2017: on the taxable amount (excl. GST) unless
+    // the vendor is flagged gross-basis; section thresholds (194C ₹30k/₹1L,
+    // 194J ₹30k) and a Section 197 certificate rate override the section rate.
+    const fy = Tax.fyRange(fields.invoice_date || todayStr());
+    let fyAggregate = 0;
+    if (vendor) {
+      const agg = await get('SELECT COALESCE(SUM(gross_amount),0) AS s FROM invoices WHERE company_id = ? AND vendor_id = ? AND invoice_date >= ? AND invoice_date <= ? AND status != ?', [coId, vendor.id, fy.start, fy.end, 'rejected']);
+      fyAggregate = agg ? Number(agg.s) : 0;
+    }
+    const tds = Tax.computeTds({
+      taxablePaise: taxable.toPaise(), grossPaise: gross.toPaise(),
+      tdsOnGross: vendor ? Number(vendor.tds_on_gross) : 0,
+      ratePct: vendor ? vendor.tds_rate : 0,
+      certRatePct: vendor ? vendor.tds_cert_rate : null,
+      section: vendor ? vendor.tds_section : null,
+      singlePaise: gross.toPaise(),
+      fyAggregatePaise: fyAggregate,
+    });
     const invId = uid('inv');
     // The uniqueness check, the invoice, its lines, the approval chain and the
     // audit row commit as ONE transaction — a failure halfway can never leave an
@@ -101,21 +159,23 @@ async function register(fastify) {
         due_date: fields.due_date || addDays(fields.invoice_date || todayStr(), vendor ? vendor.credit_days : 30),
         source, status: 'pending_approval',
         gross_amount: Number(gross.toPaise()), taxable_amount: Number(taxable.toPaise()),
-        cgst: Number(cgst.toPaise()), sgst: Number(sgst.toPaise()), igst: Number(igst.toPaise()), cess: 0,
-        tds_amount: Number(tds.toPaise()), net_payable: Number(gross.minus(tds).toPaise()),
+        cgst: Number(gst.cgst), sgst: Number(gst.sgst), igst: Number(gst.igst), cess: Number(gst.cess),
+        tds_amount: Number(tds.tds), net_payable: Number(gross.minus(Money.fromPaise(tds.tds)).toPaise()),
         gstin_vendor: fields.gstin_vendor || (vendor ? vendor.gstin : null),
         hsns: JSON.stringify(fields.hsns || []),
         three_way_match: 'none',
         ocr_json: JSON.stringify({ engine: OcrEngine.name, confidence: source === 'pdf' ? 0.95 : 1 }),
         created_by: user.id, created_at: nowIso(),
       });
-      if (fields.hsns && fields.hsns.length) {
-        for (const l of fields.hsns) {
-          await tx.insert(T.invoice_lines).values({ id: uid('l'), invoice_id: invId, hsn: l.hsn, description: l.description, qty: l.qty || 1, rate: l.rate || 0, taxable: l.taxable || 0, cgst: l.cgst || 0, sgst: l.sgst || 0, igst: l.igst || 0, cess: 0 });
-        }
+      for (const l of lineRows) {
+        await tx.insert(T.invoice_lines).values({ id: uid('l'), invoice_id: invId, hsn: l.hsn, description: l.description, qty: l.qty, rate: l.rate, taxable: l.taxable, cgst: l.cgst, sgst: l.sgst, igst: l.igst, cess: l.cess });
       }
       await createApprovalChain(coId, invId, tx);
-      await audit(coId, user, 'invoice.captured', 'invoice', invId, { source, invoice_no: fields.invoice_no }, tx);
+      await audit(coId, user, 'invoice.captured', 'invoice', invId, {
+        source, invoice_no: fields.invoice_no, taxable: Number(taxable.toPaise()),
+        cgst: Number(gst.cgst), sgst: Number(gst.sgst), igst: Number(gst.igst), cess: Number(gst.cess),
+        tds: Number(tds.tds), tds_rate: tds.ratePct, tds_base: tds.basePaise, tds_exempt: tds.exempt, tds_reason: tds.reason,
+      }, tx);
     });
     reply.ok(publicize(await get('SELECT * FROM invoices WHERE id = ?', [invId]), 'invoices'));
   });

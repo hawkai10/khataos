@@ -162,6 +162,8 @@ CREATE TABLE IF NOT EXISTS vendors (
   ledger_name TEXT NOT NULL,
   tds_section TEXT,
   tds_rate REAL DEFAULT 0,
+  tds_on_gross INTEGER DEFAULT 0,
+  tds_cert_rate REAL,
   credit_days INTEGER DEFAULT 30,
   category TEXT,
   active INTEGER DEFAULT 1
@@ -456,6 +458,8 @@ const MIGRATIONS = [
   'ALTER TABLE tally_ledgers ADD COLUMN tally_alterid INTEGER DEFAULT 0',
   'ALTER TABLE tally_groups ADD COLUMN tally_guid TEXT',
   'ALTER TABLE tally_groups ADD COLUMN tally_alterid INTEGER DEFAULT 0',
+  'ALTER TABLE vendors ADD COLUMN tds_on_gross INTEGER DEFAULT 0',
+  'ALTER TABLE vendors ADD COLUMN tds_cert_rate REAL',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_vouchers_guid ON tally_vouchers(company_id, tally_guid)',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_ledgers_guid ON tally_ledgers(company_id, tally_guid)',
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_tally_groups_guid ON tally_groups(company_id, tally_guid)',

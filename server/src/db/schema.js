@@ -146,6 +146,8 @@ const TABLES = [
       ledger_name: { type: 'text', notNull: true },
       tds_section: { type: 'text' },
       tds_rate: { type: 'real', default: 0 },
+      tds_on_gross: { type: 'integer', default: 0 },
+      tds_cert_rate: { type: 'real' },
       credit_days: { type: 'integer', default: 30 },
       category: { type: 'text' },
       active: { type: 'integer', default: 1 },

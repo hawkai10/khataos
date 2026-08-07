@@ -182,7 +182,7 @@ function CaptureDialog({ onDone }) {
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
     vendor_id: '', invoice_no: '', invoice_date: '', due_date: '',
-    taxable_amount: '', cgst: '', sgst: '', igst: '', gross_amount: '', tds_amount: '', gstin_vendor: '',
+    taxable_amount: '', gst_rate: '', cgst: '', sgst: '', igst: '', gstin_vendor: '',
   });
   const [ocrText, setOcrText] = useState('');
   const [ocrResult, setOcrResult] = useState(null);
@@ -200,11 +200,12 @@ function CaptureDialog({ onDone }) {
         invoice_date: form.invoice_date,
         due_date: form.due_date || null,
         taxable_amount: form.taxable_amount ? String(form.taxable_amount) : '0',
-        cgst: form.cgst ? String(form.cgst) : '0',
-        sgst: form.sgst ? String(form.sgst) : '0',
-        igst: form.igst ? String(form.igst) : '0',
-        gross_amount: form.gross_amount ? String(form.gross_amount) : '0',
-        tds_amount: form.tds_amount ? String(form.tds_amount) : '0',
+        // The server never guesses a GST rate — send the explicit rate (0 for
+        // exempt); cgst/sgst/igst below are optional and validated against it.
+        gst_rate: form.gst_rate !== '' ? String(form.gst_rate) : undefined,
+        cgst: form.cgst || undefined,
+        sgst: form.sgst || undefined,
+        igst: form.igst || undefined,
         gstin_vendor: form.gstin_vendor || null,
       });
       toast.success('Invoice captured and routed for approval');
@@ -255,12 +256,11 @@ function CaptureDialog({ onDone }) {
               <div className="space-y-1.5"><Label>Invoice date</Label><Input type="date" value={form.invoice_date} onChange={set('invoice_date')} /></div>
               <div className="space-y-1.5"><Label>Due date</Label><Input type="date" value={form.due_date} onChange={set('due_date')} /></div>
               <div className="space-y-1.5"><Label>Taxable amount</Label><Input type="number" value={form.taxable_amount} onChange={set('taxable_amount')} /></div>
-              <div className="space-y-1.5"><Label>Vendor GSTIN</Label><Input value={form.gstin_vendor} onChange={set('gstin_vendor')} placeholder="15-char GSTIN" /></div>
-              <div className="space-y-1.5"><Label>CGST</Label><Input type="number" value={form.cgst} onChange={set('cgst')} /></div>
-              <div className="space-y-1.5"><Label>SGST</Label><Input type="number" value={form.sgst} onChange={set('sgst')} /></div>
-              <div className="space-y-1.5"><Label>IGST</Label><Input type="number" value={form.igst} onChange={set('igst')} /></div>
-              <div className="space-y-1.5"><Label>TDS amount</Label><Input type="number" value={form.tds_amount} onChange={set('tds_amount')} /></div>
-              <div className="col-span-2 space-y-1.5"><Label>Gross amount</Label><Input type="number" value={form.gross_amount} onChange={set('gross_amount')} placeholder="taxable + taxes − TDS" /></div>
+              <div className="space-y-1.5"><Label>GST rate (%)</Label><Input type="number" value={form.gst_rate} onChange={set('gst_rate')} placeholder="e.g. 18 (0 = exempt)" /></div>
+              <div className="space-y-1.5"><Label>Vendor GSTIN</Label><Input value={form.gstin_vendor} onChange={set('gstin_vendor')} placeholder="15-char GSTIN — derives intra/inter-state" /></div>
+              <div className="space-y-1.5"><Label>CGST (optional)</Label><Input type="number" value={form.cgst} onChange={set('cgst')} /></div>
+              <div className="space-y-1.5"><Label>SGST (optional)</Label><Input type="number" value={form.sgst} onChange={set('sgst')} /></div>
+              <div className="space-y-1.5"><Label>IGST (optional)</Label><Input type="number" value={form.igst} onChange={set('igst')} /></div>
             </div>
             <DialogFooter>
               <Button onClick={submit} disabled={busy || !form.invoice_no}>{busy ? 'Saving…' : 'Capture invoice'}</Button>

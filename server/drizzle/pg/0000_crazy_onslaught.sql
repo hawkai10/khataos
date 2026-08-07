@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS "vendors" (
 	"ledger_name" text NOT NULL,
 	"tds_section" text,
 	"tds_rate" double precision DEFAULT 0,
+	"tds_on_gross" integer DEFAULT 0,
+	"tds_cert_rate" double precision,
 	"credit_days" integer DEFAULT 30,
 	"category" text,
 	"active" integer DEFAULT 1

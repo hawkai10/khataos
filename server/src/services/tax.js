@@ -7,6 +7,9 @@
 // rate, a state, or a base — if the input can't determine one, it throws a
 // 400 via ApiError.
 //
+// All amounts are paise (Number or BigInt in, BigInt-safe math out via Money);
+// the functions return plain Numbers (safe integers) for persistence.
+//
 // TDS (Circular 23/2017): deducted on the amount EXCLUDING GST when GST is
 // separately indicated (the default), or on the gross when the invoice does
 // not separate GST (vendor.tds_on_gross). Section thresholds: 194C ₹30k
@@ -54,10 +57,11 @@ function fyRange(dateStr) {
 // ----------------------------------------------------------------------------
 
 // Given the explicit inputs, compute the GST split. Returns
-// { cgst, sgst, igst, cess } in paise plus the per-line rows to persist.
-// Throws 400 whenever the split cannot be derived from real inputs.
+// { cgst, sgst, igst, cess, lineRows } with paise as plain Numbers. Throws
+// 400 whenever the split cannot be derived from real inputs.
 function computeGst(opts) {
   const { taxablePaise, lines = [], gstRatePct, explicit = {}, companyGstin, supplierGstin } = opts;
+  const taxable = Money.fromPaise(taxablePaise).toPaise(); // BigInt
   const cs = gstState(companyGstin);
   const ss = gstState(supplierGstin);
   // Explicit totals only count when at least one is a real non-zero figure —
@@ -65,39 +69,49 @@ function computeGst(opts) {
   // exempt invoice must be declared via gst_rate: 0, never by omission).
   const hasExplicit = ['cgst', 'sgst', 'igst', 'cess'].some((k) => explicit[k] != null && explicit[k] !== '' && Number(explicit[k]) !== 0);
 
+  const toNum = (v) => Number(Money.fromPaise(v || 0).toPaise());
+
   // ---- per-line computation (HSN-driven rates) ----
   const lineRows = [];
   if (lines.length) {
-    let sumTaxable = 0, sumCgst = 0, sumSgst = 0, sumIgst = 0, sumCess = 0;
+    let sumTaxable = 0n, sumCgst = 0n, sumSgst = 0n, sumIgst = 0n, sumCess = 0n;
     for (const l of lines) {
-      const lineTaxable = Number(l.taxable || 0);
-      let cgst = 0, sgst = 0, igst = 0, cess = 0;
-      const hasLineTax = ['cgst', 'sgst', 'igst', 'cess'].some((k) => l[k] != null && l[k] !== '');
-      if (l.gst_rate != null && l.gst_rate !== '') {
+      const lineTaxable = Money.fromPaise(l.taxable || 0).toPaise();
+      let cgst = 0n, sgst = 0n, igst = 0n, cess = 0n;
+      // Cess is orthogonal to the tax split — only cgst/sgst/igst decide
+      // whether a line declares its own tax amounts vs. a rate.
+      const hasLineTax = ['cgst', 'sgst', 'igst'].some((k) => l[k] != null && l[k] !== '');
+      // Precedence: a per-line gst_rate, else per-line explicit tax, else the
+      // invoice-level gst_rate as the line default.
+      const effRate = l.gst_rate != null && l.gst_rate !== '' ? l.gst_rate : gstRatePct;
+      if (effRate != null && effRate !== '' && !hasLineTax) {
         // Rate-driven: place of supply decides CGST/SGST vs IGST.
         if (cs == null || ss == null) {
           throw new ApiError(400, 'GST rate requires both the company and supplier GSTIN (to derive intra/inter-state); missing GSTIN or place of supply');
         }
-        const rate = Number(l.gst_rate);
+        const rate = Number(effRate);
         if (!Number.isFinite(rate) || rate < 0 || rate > GST_MAX_RATE_PCT) {
-          throw new ApiError(400, `invalid gst_rate ${l.gst_rate} on line ${l.hsn || ''} — must be 0-${GST_MAX_RATE_PCT}%`);
+          throw new ApiError(400, `invalid gst_rate ${effRate} on line ${l.hsn || ''} — must be 0-${GST_MAX_RATE_PCT}%`);
         }
-        const tax = new Money(lineTaxable).percentBps(Math.round(rate * 100));
-        if (cs === ss) { cgst = Math.round(tax.toPaise() / 2); sgst = tax.toPaise() - cgst; }
-        else { igst = tax.toPaise(); }
-        if (l.cess != null && l.cess !== '') cess = Number(l.cess) || 0;
+        const tax = Money.fromPaise(lineTaxable).percentBps(Math.round(rate * 100)).toPaise();
+        if (cs === ss) { const half = tax / 2n; cgst = half; sgst = tax - half; }
+        else { igst = tax; }
+        if (l.cess != null && l.cess !== '') cess = Money.fromPaise(l.cess).toPaise();
       } else if (hasLineTax) {
-        cgst = Number(l.cgst || 0); sgst = Number(l.sgst || 0); igst = Number(l.igst || 0); cess = Number(l.cess || 0);
+        cgst = Money.fromPaise(l.cgst || 0).toPaise();
+        sgst = Money.fromPaise(l.sgst || 0).toPaise();
+        igst = Money.fromPaise(l.igst || 0).toPaise();
+        cess = Money.fromPaise(l.cess || 0).toPaise();
       } else {
         throw new ApiError(400, `line ${l.hsn || '(no hsn)'} needs a gst_rate or explicit cgst/sgst/igst/cess — capture does not guess tax`);
       }
       sumTaxable += lineTaxable; sumCgst += cgst; sumSgst += sgst; sumIgst += igst; sumCess += cess;
-      lineRows.push({ hsn: l.hsn || null, description: l.description || null, qty: l.qty || 1, rate: l.rate || 0, taxable: lineTaxable, cgst, sgst, igst, cess });
+      lineRows.push({ hsn: l.hsn || null, description: l.description || null, qty: l.qty || 1, rate: l.rate || 0, taxable: Number(lineTaxable), cgst: Number(cgst), sgst: Number(sgst), igst: Number(igst), cess: Number(cess) });
     }
-    if (Math.abs(sumTaxable - taxablePaise) > 1) {
-      throw new ApiError(400, `line taxable (${sumTaxable}) does not reconcile with taxable_amount (${taxablePaise})`);
+    if (Math.abs(Number(sumTaxable - taxable)) > 1) {
+      throw new ApiError(400, `line taxable (${sumTaxable}) does not reconcile with taxable_amount (${taxable})`);
     }
-    const totals = { cgst: sumCgst, sgst: sumSgst, igst: sumIgst, cess: sumCess };
+    const totals = { cgst: Number(sumCgst), sgst: Number(sumSgst), igst: Number(sumIgst), cess: Number(sumCess) };
     reconcileExplicit(explicit, totals);
     validateSplit(totals, cs, ss);
     return { ...totals, lineRows };
@@ -112,10 +126,11 @@ function computeGst(opts) {
     if (cs == null || ss == null) {
       throw new ApiError(400, 'gst_rate requires both the company and supplier GSTIN (to derive intra/inter-state); missing GSTIN or place of supply');
     }
-    const tax = new Money(taxablePaise).percentBps(Math.round(rate * 100));
+    const tax = Money.fromPaise(taxable).percentBps(Math.round(rate * 100)).toPaise();
+    const half = tax / 2n;
     const totals = cs === ss
-      ? { cgst: Math.round(tax.toPaise() / 2), sgst: tax.toPaise() - Math.round(tax.toPaise() / 2), igst: 0, cess: Number(explicit.cess || 0) }
-      : { cgst: 0, sgst: 0, igst: tax.toPaise(), cess: Number(explicit.cess || 0) };
+      ? { cgst: Number(half), sgst: Number(tax - half), igst: 0, cess: toNum(explicit.cess) }
+      : { cgst: 0, sgst: 0, igst: Number(tax), cess: toNum(explicit.cess) };
     reconcileExplicit(explicit, totals);
     return { ...totals, lineRows };
   }
@@ -123,7 +138,14 @@ function computeGst(opts) {
   if (hasExplicit) {
     // Caller-declared split — use it, but verify it is consistent with the
     // derived place of supply when both GSTINs are known.
-    const totals = { cgst: Number(explicit.cgst || 0), sgst: Number(explicit.sgst || 0), igst: Number(explicit.igst || 0), cess: Number(explicit.cess || 0) };
+    let totals = { cgst: toNum(explicit.cgst), sgst: toNum(explicit.sgst), igst: toNum(explicit.igst), cess: toNum(explicit.cess) };
+    // CGST and SGST rates are equal by statute: for an intra-state invoice
+    // with only one side declared, the other side is derived — this is a legal
+    // identity, not a guessed rate.
+    if (cs != null && ss != null && cs === ss && totals.igst === 0) {
+      if (totals.cgst > 0 && totals.sgst === 0) totals.sgst = totals.cgst;
+      else if (totals.sgst > 0 && totals.cgst === 0) totals.cgst = totals.sgst;
+    }
     validateSplit(totals, cs, ss);
     return { ...totals, lineRows };
   }
@@ -157,7 +179,7 @@ function validateSplit(totals, cs, ss) {
 // ----------------------------------------------------------------------------
 
 // Compute the TDS amount for one invoice. Returns
-// { tds, ratePct, basePaise, exempt, reason }.
+// { tds, ratePct, basePaise, exempt, reason } (paise as plain Numbers).
 //   - base: taxable (excl. GST) per Circular 23/2017, or gross when
 //     tdsOnGross is set (GST not separately indicated).
 //   - rate: the Section 197 certificate rate when present, else the section
@@ -166,17 +188,32 @@ function validateSplit(totals, cs, ss) {
 //     overrides the threshold exemption.
 function computeTds(opts) {
   const { taxablePaise, grossPaise, tdsOnGross = 0, ratePct = 0, certRatePct, section, singlePaise, fyAggregatePaise = 0 } = opts;
-  const basePaise = tdsOnGross ? grossPaise : taxablePaise;
+  const taxable = Money.fromPaise(taxablePaise).toPaise(); // BigInt
+  const gross = Money.fromPaise(grossPaise).toPaise();
+  const base = tdsOnGross ? gross : taxable;
   const rate = certRatePct != null ? Number(certRatePct) : (Number(ratePct) || 0);
-  if (rate <= 0) return { tds: 0, ratePct: 0, basePaise, exempt: false, reason: 'no TDS rate configured' };
+  // Validate BEFORE the zero/early return so a bad certificate rate (negative,
+  // NaN, > 30%) is a 400, never a silent 0 or a 500.
+  if (!Number.isFinite(rate) || rate < 0) {
+    throw new ApiError(400, `invalid TDS rate ${certRatePct != null ? certRatePct : ratePct}`);
+  }
+  if (certRatePct != null && rate > 30) throw new ApiError(400, `invalid Section 197 certificate rate ${certRatePct}`);
+  if (rate === 0) return { tds: 0, ratePct: 0, basePaise: Number(base), exempt: false, reason: 'no TDS rate configured' };
+
+  const single = Money.fromPaise(singlePaise == null ? gross : singlePaise).toPaise();
+  const fyAgg = Money.fromPaise(fyAggregatePaise || 0).toPaise();
 
   if (certRatePct == null) {
     const t = TDS_SECTIONS[section];
     if (t) {
-      const singleExempt = singlePaise <= Money.fromRupees(t.single).toPaise();
-      const aggregateExempt = t.aggregate != null && fyAggregatePaise <= Money.fromRupees(t.aggregate).toPaise();
+      const singleExempt = single <= Money.fromRupees(t.single).toPaise();
+      // Sections with an FY aggregate cap are exempt only while the aggregate
+      // INCLUDING this invoice stays under the cap.
+      const aggregateExempt = t.aggregate == null
+        ? true
+        : (fyAgg + single) <= Money.fromRupees(t.aggregate).toPaise();
       if (singleExempt && aggregateExempt) {
-        return { tds: 0, ratePct: rate, basePaise, exempt: true, reason: `${section}: below thresholds (single ₹${t.single} / FY ₹${t.aggregate ?? '—'})` };
+        return { tds: 0, ratePct: rate, basePaise: Number(base), exempt: true, reason: `${section}: below thresholds (single ₹${t.single} / FY ₹${t.aggregate ?? '—'})` };
       }
     }
   } else {
@@ -185,7 +222,7 @@ function computeTds(opts) {
     if (rate < 0 || rate > 30) throw new ApiError(400, `invalid Section 197 certificate rate ${certRatePct}`);
   }
 
-  return { tds: new Money(basePaise).percentBps(Math.round(rate * 100)).toPaise(), ratePct: rate, basePaise, exempt: false, reason: `${section || 'TDS'} at ${rate}% on ${tdsOnGross ? 'gross' : 'taxable'}` };
+  return { tds: Number(Money.fromPaise(base).percentBps(Math.round(rate * 10000)).toPaise()), ratePct: rate, basePaise: Number(base), exempt: false, reason: `${section || 'TDS'} at ${rate}% on ${tdsOnGross ? 'gross' : 'taxable'}` };
 }
 
 module.exports = { TDS_SECTIONS, GST_MAX_RATE_PCT, gstState, fyRange, computeGst, computeTds };

@@ -65,7 +65,8 @@ async function check(name, fn) {
       payload: JSON.stringify({
         vendor_id: 'v-good', invoice_no: 'INV-GOOD', invoice_date: todayStr(),
         taxable_amount: '5000.00', cgst: '450.00', sgst: '450.00',
-        hsns: [{ hsn: '7308', description: 'item', qty: 1, rate: 5000, taxable: 5000, cgst: 450, sgst: 450 }],
+        // line amounts are paise (invoice cgst 450.00 = 45000 paise)
+        hsns: [{ hsn: '7308', description: 'item', qty: 1, rate: 500000, taxable: 500000, cgst: 45000, sgst: 45000 }],
       }),
     });
     assert.strictEqual(res.statusCode, 200, res.body.slice(0, 200));
