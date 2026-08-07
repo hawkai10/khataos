@@ -3,6 +3,19 @@
 // Unit tests for the Decentro adapter mapping + config, using the exact
 // response shape published in Decentro's Connected Banking docs.
 
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+
+// This test only exercises the adapter's mapping/config (it never touches the
+// DB), but requiring the adapter loads the storage layer — point it at a fresh
+// temp DB so a broken default dev database can never fail-fast the test.
+const TEST_DB = path.join(os.tmpdir(), 'khataos-data', 'decentro-' + process.pid + '.db');
+process.env.KHATAOS_DB = TEST_DB;
+for (const f of [TEST_DB, TEST_DB + '-wal', TEST_DB + '-shm']) {
+  try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
+}
+
 const assert = require('assert');
 const Decentro = require('../server/src/decentro');
 

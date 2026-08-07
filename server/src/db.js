@@ -12,7 +12,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 
 // Drizzle ORM layer: coexists with the custom wrapper during the transition.
 // Schema lives in src/db/schema.js (one declarative source -> both dialects);
@@ -710,21 +709,15 @@ if (DB_ENGINE === 'sqlite') {
     runMigrations((sql) => sqliteDb.exec(sql));
     runVersionedMigrations((sql) => sqliteDb.exec(sql), (sql) => sqliteDb.prepare(sql).all());
   } catch (err) {
-    const fallbackDir = path.join(os.tmpdir(), 'khataos-data');
-    fs.mkdirSync(fallbackDir, { recursive: true });
-    DB_PATH = path.join(fallbackDir, 'khataos.db');
-    if (!probeWritable(fallbackDir)) {
-      console.error(`[db] Fatal: cannot open ${PRIMARY_DB} (${err.message}) or ${DB_PATH}`);
-      process.exit(1);
-    }
-    sqliteDb = new DatabaseSync(DB_PATH);
-    sqliteDb.exec('PRAGMA journal_mode = WAL;');
-    sqliteDb.exec('PRAGMA foreign_keys = ON;');
-    sqliteDb.exec('PRAGMA busy_timeout = ' + BUSY_TIMEOUT_MS + ';');
-    sqliteDb.exec(SCHEMA);
-    runMigrations((sql) => sqliteDb.exec(sql));
-    runVersionedMigrations((sql) => sqliteDb.exec(sql), (sql) => sqliteDb.prepare(sql).all());
-    console.warn(`[db] Could not open ${PRIMARY_DB} (${err.message}). Using ${DB_PATH} instead.`);
+    // A database that cannot be opened at its configured path is a fatal
+    // misconfiguration (read-only container filesystem, wrong volume mount,
+    // permission drift), NOT a degraded mode. There is deliberately NO silent
+    // fallback to a temp directory: that would write the whole financial
+    // database to ephemeral storage and lose it on the next restart. Fail
+    // fast with a non-zero exit instead.
+    console.error(`[db] Fatal: cannot open the SQLite database at ${PRIMARY_DB}: ${err.message}`);
+    console.error(`[db] Fix the KHATAOS_DB path (or the filesystem it points to) and restart. Refusing to start with a degraded database.`);
+    process.exit(1);
   }
   impl = {
     all: (sql, params) => sqliteDb.prepare(sql).all(...params),
@@ -734,11 +727,14 @@ if (DB_ENGINE === 'sqlite') {
   };
   engineClient = sqliteDb;
   ready = Promise.resolve();
-  // Drizzle is additive during the transition: a migration failure (e.g. an
-  // ancient schema missing a column) is logged and leaves drizzleDb null;
-  // getDrizzle() then fails loudly for converted modules, while modules still
-  // on the custom wrapper keep working.
-  drizzleReady = initDrizzle().catch((err) => { console.error(`[db] Drizzle migration failed: ${err.message}`); drizzleDb = null; });
+  // The Drizzle layer is mandatory for every mutating use case (they all run
+  // through withTransaction/getDrizzle), so a migration failure is fatal too:
+  // continuing would leave the app half-initialized (wrapper works, Drizzle
+  // dead) and every write would fail mid-flight. Exit instead.
+  drizzleReady = initDrizzle().catch((err) => {
+    console.error(`[db] Fatal: Drizzle schema migration failed on ${DB_PATH}: ${err.message}`);
+    process.exit(1);
+  });
 } else {
   // pglite or postgres — async init
   ready = (async () => {
@@ -806,10 +802,11 @@ async function insert(table, obj) {
 }
 
 // Drizzle query-builder accessor for modules converted off the custom wrapper.
+// drizzleReady rejects (and the process exits) on any migration failure, so
+// drizzleDb is always initialized here.
 async function getDrizzle() {
   await ready;
   await drizzleReady;
-  if (!drizzleDb) throw new Error('Drizzle instance unavailable (migrations did not apply cleanly)');
   return drizzleDb;
 }
 
